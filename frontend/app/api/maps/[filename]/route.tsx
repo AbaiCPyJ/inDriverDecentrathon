@@ -35,8 +35,8 @@ const generateMockMapHTML = (type: string) => {
     </div>
     
     <script>
-        // Initialize map centered on Moscow
-        var map = L.map('map').setView([55.7558, 37.6176], 11);
+        // Initialize map centered on Astana, Kazakhstan  
+        var map = L.map('map').setView([51.091385, 71.417226], 13);
         
         // Add OpenStreetMap tiles
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -49,21 +49,21 @@ const generateMockMapHTML = (type: string) => {
         if ('${type}' === 'popular-routes') {
             // Sample popular route
             var route = [
-                [55.7558, 37.6176],
-                [55.7608, 37.6256],
-                [55.7658, 37.6336],
-                [55.7708, 37.6416]
+                [51.091385, 71.417226],
+                [51.095385, 71.422226],
+                [51.099385, 71.427226],
+                [51.103385, 71.432226]
             ];
             L.polyline(route, {color: '#16a34a', weight: 4}).addTo(map);
-            L.marker([55.7558, 37.6176]).addTo(map).bindPopup('Popular Route Start');
-            L.marker([55.7708, 37.6416]).addTo(map).bindPopup('Popular Route End');
+            L.marker([51.091385, 71.417226]).addTo(map).bindPopup('Popular Route Start - Astana');
+            L.marker([51.103385, 71.432226]).addTo(map).bindPopup('Popular Route End - Astana');
         }
         
         if ('${type}' === 'endpoints') {
             // Sample endpoint heatmap points
             for (let i = 0; i < 20; i++) {
-                var lat = 55.7558 + (Math.random() - 0.5) * 0.1;
-                var lng = 37.6176 + (Math.random() - 0.5) * 0.1;
+                var lat = 51.091385 + (Math.random() - 0.5) * 0.02;
+                var lng = 71.417226 + (Math.random() - 0.5) * 0.02;
                 L.circleMarker([lat, lng], {
                     radius: Math.random() * 10 + 5,
                     fillColor: '#16a34a',
@@ -78,8 +78,8 @@ const generateMockMapHTML = (type: string) => {
         if ('${type}' === 'trajectories') {
             // Sample trajectory paths
             for (let i = 0; i < 5; i++) {
-                var startLat = 55.7558 + (Math.random() - 0.5) * 0.05;
-                var startLng = 37.6176 + (Math.random() - 0.5) * 0.05;
+                var startLat = 51.091385 + (Math.random() - 0.5) * 0.02;
+                var startLng = 71.417226 + (Math.random() - 0.5) * 0.02;
                 var endLat = startLat + (Math.random() - 0.5) * 0.02;
                 var endLng = startLng + (Math.random() - 0.5) * 0.02;
                 
@@ -95,8 +95,8 @@ const generateMockMapHTML = (type: string) => {
             // Sample speed analysis segments
             var speedColors = ['#ef4444', '#f97316', '#eab308', '#16a34a'];
             for (let i = 0; i < 10; i++) {
-                var lat = 55.7558 + (Math.random() - 0.5) * 0.08;
-                var lng = 37.6176 + (Math.random() - 0.5) * 0.08;
+                var lat = 51.091385 + (Math.random() - 0.5) * 0.02;
+                var lng = 71.417226 + (Math.random() - 0.5) * 0.02;
                 var endLat = lat + (Math.random() - 0.5) * 0.01;
                 var endLng = lng + (Math.random() - 0.5) * 0.01;
                 
@@ -116,11 +116,28 @@ const generateMockMapHTML = (type: string) => {
 export async function GET(request: NextRequest, { params }: { params: { filename: string } }) {
   const filename = params.filename
 
-  // Extract analysis type from filename (e.g., "popular-routes.html")
-  const analysisType = filename.replace(".html", "")
+  try {
+    // Try to fetch the actual map from the backend first
+    const backendUrl = `http://localhost:8000/api/maps/${filename}`
+    
+    const response = await fetch(backendUrl)
+    
+    if (response.ok) {
+      // Return the actual backend-generated map (Astana with OpenStreetMap)
+      const mapHTML = await response.text()
+      return new NextResponse(mapHTML, {
+        headers: {
+          "Content-Type": "text/html",
+          "Cache-Control": "public, max-age=3600",
+        },
+      })
+    }
+  } catch (error) {
+    console.log("Backend not available, falling back to mock map")
+  }
 
-  // In a real implementation, this would fetch the actual map file
-  // For demo purposes, we generate a mock Leaflet map
+  // Fallback to mock map if backend is not available
+  const analysisType = filename.replace(".html", "")
   const mapHTML = generateMockMapHTML(analysisType)
 
   return new NextResponse(mapHTML, {
