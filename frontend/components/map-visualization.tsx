@@ -5,14 +5,15 @@ import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, RefreshCw, Download, Maximize2 } from "lucide-react"
+import type { Job } from "@/lib/api"
 
 interface MapVisualizationProps {
   type: "popular-routes" | "endpoints" | "trajectories" | "speed"
   status: "idle" | "running" | "completed" | "error"
-  jobId?: string | null // Added jobId prop for job-specific maps
+  job?: Job | null // Job object with results
 }
 
-export function MapVisualization({ type, status, jobId }: MapVisualizationProps) {
+export function MapVisualization({ type, status, job }: MapVisualizationProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -26,24 +27,27 @@ export function MapVisualization({ type, status, jobId }: MapVisualizationProps)
   }
 
   useEffect(() => {
-    if (status === "completed") {
-      const url = jobId ? `/api/maps/${jobId}.html` : mockMapUrls[type]
-      setMapUrl(url)
+    if (status === "completed" && job?.results?.mapUrl) {
+      setMapUrl(job.results.mapUrl)
+      setError(null)
+    } else if (status === "completed") {
+      // Fallback to mock URL if no job results
+      setMapUrl(mockMapUrls[type])
       setError(null)
     } else if (status === "error") {
-      setError("Failed to generate map visualization")
+      setError(job?.error || "Failed to generate map visualization")
       setMapUrl(null)
     } else if (status === "running") {
       setMapUrl(null)
       setError(null)
     }
-  }, [status, type, jobId])
+  }, [status, type, job])
 
   const handleRefresh = () => {
     setIsLoading(true)
     // Simulate refresh delay
     setTimeout(() => {
-      const url = jobId ? `/api/maps/${jobId}.html` : mockMapUrls[type]
+      const url = job?.results?.mapUrl || mockMapUrls[type]
       setMapUrl(url)
       setIsLoading(false)
     }, 1000)
@@ -95,7 +99,7 @@ export function MapVisualization({ type, status, jobId }: MapVisualizationProps)
         <div>
           <h3 className="text-lg font-medium">{getMapTitle()}</h3>
           <p className="text-sm text-muted-foreground">{getMapDescription()}</p>
-          {jobId && <p className="text-xs text-muted-foreground">Job ID: {jobId}</p>}
+          {job?.id && <p className="text-xs text-muted-foreground">Job ID: {job.id}</p>}
         </div>
 
         <div className="flex items-center gap-2">
@@ -189,70 +193,46 @@ export function MapVisualization({ type, status, jobId }: MapVisualizationProps)
       </Card>
 
       {/* Map Statistics */}
-      {status === "completed" && (
+      {status === "completed" && job?.results?.statistics && (
         <div className="grid grid-cols-4 gap-4">
           <Card className="p-4">
             <div className="text-2xl font-bold text-green-600">
-              {type === "popular-routes"
-                ? "1,247"
-                : type === "endpoints"
-                  ? "3,892"
-                  : type === "trajectories"
-                    ? "856"
-                    : "2,341"}
+              {job.results.statistics.totalRecords?.toLocaleString() || "N/A"}
             </div>
-            <div className="text-sm text-muted-foreground">
-              {type === "popular-routes"
-                ? "Routes analyzed"
-                : type === "endpoints"
-                  ? "Endpoints mapped"
-                  : type === "trajectories"
-                    ? "Trajectories plotted"
-                    : "Speed segments"}
-            </div>
+            <div className="text-sm text-muted-foreground">Records processed</div>
           </Card>
 
           <Card className="p-4">
             <div className="text-2xl font-bold">
-              {type === "popular-routes"
-                ? "89%"
-                : type === "endpoints"
-                  ? "94%"
-                  : type === "trajectories"
-                    ? "76%"
-                    : "82%"}
+              {job.results.statistics.uniqueVehicles?.toLocaleString() || "N/A"}
             </div>
-            <div className="text-sm text-muted-foreground">Coverage rate</div>
+            <div className="text-sm text-muted-foreground">Unique vehicles</div>
           </Card>
 
           <Card className="p-4">
             <div className="text-2xl font-bold">
-              {type === "popular-routes"
-                ? "12.3km"
-                : type === "endpoints"
-                  ? "45.2km²"
-                  : type === "trajectories"
-                    ? "8.7km"
-                    : "67.1km"}
+              {job.results.statistics.avgSpeed ? `${job.results.statistics.avgSpeed} km/h` : "N/A"}
             </div>
-            <div className="text-sm text-muted-foreground">
-              {type === "endpoints" ? "Area covered" : "Avg distance"}
-            </div>
+            <div className="text-sm text-muted-foreground">Average speed</div>
           </Card>
 
           <Card className="p-4">
             <div className="text-2xl font-bold">
-              {type === "popular-routes"
-                ? "15min"
-                : type === "endpoints"
-                  ? "8min"
-                  : type === "trajectories"
-                    ? "22min"
-                    : "18min"}
+              {job.results.statistics.maxSpeed ? `${job.results.statistics.maxSpeed} km/h` : "N/A"}
             </div>
-            <div className="text-sm text-muted-foreground">Processing time</div>
+            <div className="text-sm text-muted-foreground">Max speed</div>
           </Card>
         </div>
+      )}
+      
+      {/* Show note if data was sampled */}
+      {status === "completed" && job?.results?.statistics?.note && (
+        <Card className="p-4 bg-blue-50 border-blue-200">
+          <div className="flex items-center gap-2">
+            <span className="text-blue-600 text-sm">ℹ️</span>
+            <p className="text-sm text-blue-800">{job.results.statistics.note}</p>
+          </div>
+        </Card>
       )}
     </div>
   )

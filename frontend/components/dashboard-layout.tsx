@@ -10,7 +10,7 @@ import { MapVisualization } from "@/components/map-visualization"
 import { JobStatus } from "@/components/job-status"
 import { JobManager } from "@/components/job-manager"
 import { Play, Square, RotateCcw, History } from "lucide-react"
-import { useJobs } from "@/lib/hooks/use-api"
+import { useJobs, useJobPolling } from "@/lib/hooks/use-api"
 import type { JobConfig } from "@/lib/api"
 
 export function DashboardLayout() {
@@ -20,27 +20,29 @@ export function DashboardLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showJobManager, setShowJobManager] = useState(false)
 
-  const { jobs, createJob, cancelJob, loading: jobsLoading } = useJobs()
+  const { jobs, createJob, cancelJob, loading: jobsLoading, refetch: refetchJobs } = useJobs()
+  
+  // Poll for job updates when we have a current job
+  const { job: currentJob } = useJobPolling(currentJobId)
 
   useEffect(() => {
-    if (currentJobId) {
-      const currentJob = jobs.find((job) => job.id === currentJobId)
-      if (currentJob) {
-        switch (currentJob.status) {
-          case "pending":
-          case "running":
-            setJobStatus("running")
-            break
-          case "completed":
-            setJobStatus("completed")
-            break
-          case "failed":
-            setJobStatus("error")
-            break
-        }
+    if (currentJob) {
+      switch (currentJob.status) {
+        case "pending":
+        case "running":
+          setJobStatus("running")
+          break
+        case "completed":
+          setJobStatus("completed")
+          // Refresh jobs list to get updated job
+          refetchJobs()
+          break
+        case "failed":
+          setJobStatus("error")
+          break
       }
     }
-  }, [jobs, currentJobId])
+  }, [currentJob, refetchJobs])
 
   const handleRunAnalysis = async () => {
     if (jobStatus === "running" && currentJobId) {
@@ -194,7 +196,7 @@ export function DashboardLayout() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <MapVisualization type="popular-routes" status={jobStatus} jobId={currentJobId} />
+                    <MapVisualization type="popular-routes" status={jobStatus} job={currentJob} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -210,7 +212,7 @@ export function DashboardLayout() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <MapVisualization type="endpoints" status={jobStatus} jobId={currentJobId} />
+                    <MapVisualization type="endpoints" status={jobStatus} job={currentJob} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -226,7 +228,7 @@ export function DashboardLayout() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <MapVisualization type="trajectories" status={jobStatus} jobId={currentJobId} />
+                    <MapVisualization type="trajectories" status={jobStatus} job={currentJob} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -242,7 +244,7 @@ export function DashboardLayout() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <MapVisualization type="speed" status={jobStatus} jobId={currentJobId} />
+                    <MapVisualization type="speed" status={jobStatus} job={currentJob} />
                   </CardContent>
                 </Card>
               </TabsContent>
