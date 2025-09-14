@@ -251,6 +251,176 @@ async def get_map(filename: str):
         raise HTTPException(status_code=404, detail="Map not found")
     return FileResponse(candidate, media_type="text/html")
 
+@app.get("/api/traffic-analysis")
+async def analyze_traffic(
+    lat: float,
+    lng: float,
+    radius_m: float = 100,
+    time_window_sec: int = 30,
+    job_id: Optional[str] = None
+):
+    """
+    Analyze traffic congestion at a specific location.
+    Returns count of vehicles that stayed in the area for at least time_window_sec.
+    """
+    try:
+        # If job_id provided, use that job's data file
+        if job_id and job_id in jobs_db:
+            csv_path = jobs_db[job_id].get("file_path")
+            if not csv_path or not Path(csv_path).exists():
+                raise HTTPException(status_code=404, detail="Job data file not found")
+        else:
+            # Find the most recent CSV file for analysis
+            csv_files = list(UPLOAD_DIR.glob("*.csv"))
+            if not csv_files:
+                return {"vehicleCount": 0, "message": "No data available"}
+            csv_path = max(csv_files, key=lambda p: p.stat().st_mtime)
+        
+        # Read the CSV data
+        df = pd.read_csv(csv_path)
+        
+        # Log data info for debugging
+        logger.info(f"Traffic analysis: CSV has {len(df)} rows, columns: {list(df.columns)}")
+        
+        # Ensure we have required columns
+        required_cols = ["lat", "lng", "randomized_id"]
+        if not all(col in df.columns for col in required_cols):
+            logger.warning(f"Missing columns. Available: {list(df.columns)}, Required: {required_cols}")
+            return {"vehicleCount": 0, "message": "Insufficient data columns", "availableColumns": list(df.columns)}
+        
+        # Calculate distance from click point to all data points using Haversine formula
+        from math import radians, cos, sin, asin, sqrt
+        
+        def haversine_distance(lat1, lon1, lat2, lon2):
+            # Convert to radians
+            lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+            
+            # Haversine formula
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+            c = 2 * asin(sqrt(a))
+            r = 6371000  # Radius of Earth in meters
+            return c * r
+        
+        # Calculate distances for all points
+        df["distance_m"] = df.apply(
+            lambda row: haversine_distance(lat, lng, row["lat"], row["lng"]),
+            axis=1
+        )
+        
+        # Filter points within radius
+        nearby_df = df[df["distance_m"] <= radius_m].copy()
+        
+        logger.info(f"Found {len(nearby_df)} points within {radius_m}m of ({lat}, {lng})")
+        
+        if len(nearby_df) == 0:
+            # Try with a larger radius to see if there's any data nearby
+            larger_radius = 500
+            nearby_larger = df[df["distance_m"] <= larger_radius]
+            logger.info(f"No data within {radius_m}m, but {len(nearby_larger)} points within {larger_radius}m")
+            
+            return {
+                "vehicleCount": 0,
+                "radius": radius_m,
+                "timeWindow": time_window_sec,
+                "message": f"No vehicles within {radius_m}m (nearest data is beyond this radius)",
+                "debug": {
+                    "clickLat": lat,
+                    "clickLng": lng,
+                    "totalDataPoints": len(df),
+                    "nearbyIn500m": len(nearby_larger)
+                }
+            }
+        
+        # Group by vehicle ID and calculate time spent in area
+        vehicle_groups = nearby_df.groupby("randomized_id")
+        
+        # Count vehicles that have multiple data points (stayed in area)
+        # More balanced criteria for "staying" in an area
+        vehicles_stayed = 0
+        total_vehicles = len(vehicle_groups)
+        
+        # Track distribution of points per vehicle for debugging
+        point_counts = []
+        
+        for vehicle_id, group in vehicle_groups:
+            # Count vehicles based on number of GPS points in the area
+            # More points = stayed longer
+            points_count = len(group)
+            point_counts.append(points_count)
+            
+            # More balanced criteria - vehicles with multiple readings stayed
+            if time_window_sec == 30 and points_count >= 2:  # At least 2 points for 30 seconds
+                vehicles_stayed += 1
+            elif time_window_sec == 60 and points_count >= 3:  # At least 3 points for 1 minute
+                vehicles_stayed += 1
+            elif time_window_sec == 300 and points_count >= 5:  # At least 5 points for 5 minutes
+                vehicles_stayed += 1
+        
+        # Log statistics for debugging
+        if point_counts:
+            max_points = max(point_counts)
+            avg_points = sum(point_counts) / len(point_counts)
+            logger.info(f"Point distribution: max={max_points}, avg={avg_points:.1f}, total_vehicles={total_vehicles}")
+        
+        logger.info(f"Analysis result: {vehicles_stayed} vehicles stayed (≥{time_window_sec}s) out of {total_vehicles} total")
+        
+        # Determine congestion level with more realistic thresholds
+        congestion_level = "light"
+        if time_window_sec == 30:
+            if vehicles_stayed > 15:
+                congestion_level = "heavy"
+            elif vehicles_stayed > 5:
+                congestion_level = "moderate"
+        elif time_window_sec == 60:
+            if vehicles_stayed > 10:
+                congestion_level = "heavy"
+            elif vehicles_stayed > 3:
+                congestion_level = "moderate"
+        elif time_window_sec == 300:
+            if vehicles_stayed > 5:
+                congestion_level = "heavy"
+            elif vehicles_stayed > 1:
+                congestion_level = "moderate"
+        
+        # If no vehicles stayed but some passed through, show that
+        if vehicles_stayed == 0 and total_vehicles > 0:
+            # Count vehicles that at least passed through (have any data points)
+            vehicles_passed = total_vehicles
+            
+            return {
+                "vehicleCount": vehicles_stayed,
+                "vehiclesPassed": vehicles_passed,
+                "totalVehiclesInArea": total_vehicles,
+                "radius": radius_m,
+                "timeWindow": time_window_sec,
+                "congestionLevel": "none",
+                "centerLat": lat,
+                "centerLng": lng,
+                "message": f"{vehicles_passed} vehicles passed through (none stayed ≥{time_window_sec}s)",
+                "avgPointsPerVehicle": avg_points if point_counts else 0
+            }
+        
+        return {
+            "vehicleCount": vehicles_stayed,
+            "totalVehiclesInArea": total_vehicles,
+            "radius": radius_m,
+            "timeWindow": time_window_sec,
+            "congestionLevel": congestion_level,
+            "centerLat": lat,
+            "centerLng": lng,
+            "avgPointsPerVehicle": avg_points if point_counts else 0
+        }
+        
+    except Exception as e:
+        logger.error(f"Traffic analysis error: {e}")
+        return {
+            "vehicleCount": 0,
+            "error": str(e),
+            "message": "Error analyzing traffic data"
+        }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

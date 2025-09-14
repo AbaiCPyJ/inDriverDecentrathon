@@ -497,9 +497,28 @@ class HeatmapGenerator:
         Now aggregates in a single global meter frame and provides a numeric legend with kg CO₂e per cell.
         """
         seg = segments.copy()
+        
+        # Filter out any rows with NaN values in critical columns
+        seg = seg.dropna(subset=['lat1', 'lat2', 'lng1', 'lng2', 'segment_kg_co2e'])
+        
+        # Check if we have any data left after filtering
+        if len(seg) == 0:
+            # Return a simple map with a message if no valid data
+            m = folium.Map(location=[51.0954, 71.4275], zoom_start=self.default_zoom)
+            self._title(m, title + " (No valid emission data available)")
+            return m.get_root().render()
+        
         # Use geographic midpoints and project into ONE global meter frame.
         seg["lat"] = 0.5 * (seg["lat1"] + seg["lat2"])
         seg["lng"] = 0.5 * (seg["lng1"] + seg["lng2"])
+        
+        # Additional NaN check after calculation
+        seg = seg.dropna(subset=['lat', 'lng'])
+        if len(seg) == 0:
+            m = folium.Map(location=[51.0954, 71.4275], zoom_start=self.default_zoom)
+            self._title(m, title + " (No valid location data available)")
+            return m.get_root().render()
+            
         lat0 = float(seg["lat"].mean())
         lng0 = float(seg["lng"].mean())
         mx, my = self._meters_per_degree(lat0)
@@ -513,7 +532,19 @@ class HeatmapGenerator:
         if vmax <= vmin:  # degenerate case
             vmin, vmax = 0.0, max(vmax, 1.0)
         norm_w = np.clip((w - vmin) / max(vmax - vmin, 1e-9), 0, 1)
-        heat = np.stack([grid["lat"].values, grid["lng"].values, norm_w], axis=1).tolist()
+        
+        # Filter out any remaining NaN values before creating heat data
+        valid_mask = ~(np.isnan(grid["lat"].values) | np.isnan(grid["lng"].values) | np.isnan(norm_w))
+        if not np.any(valid_mask):
+            m = folium.Map(location=[lat0, lng0], zoom_start=self.default_zoom)
+            self._title(m, title + " (Insufficient data for visualization)")
+            return m.get_root().render()
+            
+        heat = np.stack([
+            grid["lat"].values[valid_mask], 
+            grid["lng"].values[valid_mask], 
+            norm_w[valid_mask]
+        ], axis=1).tolist()
 
         # Acid palette: neon green → yellow → orange → hot pink
         acid = {
