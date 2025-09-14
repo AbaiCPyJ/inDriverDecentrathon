@@ -4,7 +4,8 @@ import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, RefreshCw, Download, Maximize2 } from "lucide-react"
+import { Loader2, RefreshCw, Download, Maximize2, MapPin } from "lucide-react"
+import { InteractiveMapOverlay } from "./interactive-map-overlay"
 import type { Job } from "@/lib/api"
 
 interface MapVisualizationProps {
@@ -17,6 +18,7 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [interactiveMode, setInteractiveMode] = useState(false)
 
   // Mock map URLs for demonstration
   const mockMapUrls = {
@@ -68,6 +70,12 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
       link.download = `${type}-map.html`
       link.click()
     }
+  }
+
+  const handleLocationTimeSelect = (lat: number, lng: number, timeSeconds: number) => {
+    console.log(`Selected location: ${lat}, ${lng} for ${timeSeconds} seconds`)
+    // Here you can add logic to filter or process data based on the selected location and time
+    // For example, you could make an API call to get data for that specific area and time window
   }
 
 
@@ -155,6 +163,18 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
                 Export
               </Button>
 
+              {type === "popular-routes" && (
+                <Button 
+                  variant={interactiveMode ? "default" : "outline"} 
+                  size="sm" 
+                  onClick={() => setInteractiveMode(!interactiveMode)}
+                  className="gap-1"
+                >
+                  <MapPin className="h-4 w-4" />
+                  {interactiveMode ? "Exit Interactive" : "Interactive Mode"}
+                </Button>
+              )}
+
               <Button variant="outline" size="sm" className="gap-1 bg-transparent">
                 <Maximize2 className="h-4 w-4" />
                 Fullscreen
@@ -230,13 +250,22 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
           )}
 
           {mapUrl && !isLoading && (
-            <iframe
-              src={mapUrl}
-              className="w-full h-full border-0"
-              title={getMapTitle()}
-              sandbox="allow-scripts allow-same-origin"
-              onError={() => setError("Failed to load map visualization")}
-            />
+            <>
+              <iframe
+                src={mapUrl}
+                className="w-full h-full border-0"
+                title={getMapTitle()}
+                sandbox="allow-scripts allow-same-origin"
+                onError={() => setError("Failed to load map visualization")}
+              />
+              {type === "popular-routes" && interactiveMode && (
+                <InteractiveMapOverlay
+                  onLocationTimeSelect={handleLocationTimeSelect}
+                  enabled={interactiveMode}
+                  jobId={job?.id || null}
+                />
+              )}
+            </>
           )}
         </div>
       </Card>
