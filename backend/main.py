@@ -1,4 +1,5 @@
 # main.py
+from __future__ import annotations
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -6,24 +7,20 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
-import json
-import os
+import json, os, uuid, logging, traceback, asyncio
 from datetime import datetime
-import uuid
 from pathlib import Path
-import logging
-import traceback
 
-from processing.data_processor import DataProcessor
-from processing.heatmap_generator import HeatmapGenerator
-# -------------------------------------------
+from processing.data_processor import DataProcessor, PathReconstructionConfig
+from processing.heatmap_generator import HeatmapGenerator, LegendSpec
 
-app = FastAPI(title="InDrive Geotracks API", version="1.1.0")
+# ----------------------------- App boot ---------------------------------------
+app = FastAPI(title="InDrive Geotracks API", version="2.0.0")
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("indrive-api")
 
-# CORS from env (comma-separated)
+# CORS
 origins = os.environ.get("ALLOW_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -33,11 +30,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Folders
 UPLOAD_DIR = Path("uploads"); UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR = Path("results"); RESULTS_DIR.mkdir(exist_ok=True)
 
-jobs_db: Dict[str, Dict] = {}
+# In-memory job store (swap for Redis/DB in prod)
+jobs_db: Dict[str, Dict[str, Any]] = {}
+# Optional: concurrency guard so we don't overload the box
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
+job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
+# ----------------------------- Models ----------------------------------------
 class JobConfig(BaseModel):
     analysisType: str
     filters: Optional[Dict[str, Any]] = {}
@@ -54,146 +57,167 @@ class JobResponse(BaseModel):
     progress: Optional[int] = 0
     results: Optional[Dict[str, Any]] = None
 
+# ----------------------------- Endpoints -------------------------------------
 @app.get("/api/health")
 async def health_check():
     return {
         "status": "healthy",
-        "version": "1.1.0",
+        "version": "2.0.0",
         "timestamp": datetime.utcnow().isoformat(),
-        "max_process_rows": int(os.environ.get('MAX_PROCESS_ROWS', '50000')),
+        "max_process_rows": int(os.environ.get("MAX_PROCESS_ROWS", "50000")),
         "ef_kg_per_km": float(os.environ.get("EF_KG_PER_KM", "0.192")),
-        "active_jobs": len([j for j in jobs_db.values() if j["status"] == "running"])
+        "active_jobs": len([j for j in jobs_db.values() if j.get("status") == "running"])
     }
 
 @app.post("/api/jobs", response_model=JobResponse)
 async def create_job(
-    analysisType: str = Form(...),                       # "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
+    analysisType: str = Form(...),      # "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
     csvFile: UploadFile = File(...),
     filters: Optional[str] = Form("{}"),
     visualization: Optional[str] = Form("{}")
 ):
+    # minimal file/type checks + streamed write
+    if not (csvFile.filename.endswith(".csv") or "csv" in (csvFile.content_type or "")):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+    file_path = UPLOAD_DIR / f"{job_id}_{csvFile.filename}"
+
+    MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
+    size = 0
+    with open(file_path, "wb") as f:
+        while chunk := await csvFile.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_MB * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="CSV too large")
+            f.write(chunk)
+
     try:
-        # quick CSV validation + streaming write
-        if not (csvFile.filename.endswith(".csv") or "csv" in (csvFile.content_type or "")):
-            raise HTTPException(status_code=400, detail="File must be a CSV")
+        filters_dict = json.loads(filters) if filters else {}
+        visualization_dict = json.loads(visualization) if visualization else {}
+    except json.JSONDecodeError:
+        filters_dict, visualization_dict = {}, {}
 
-        job_id = f"job_{uuid.uuid4().hex[:8]}"
-        file_path = UPLOAD_DIR / f"{job_id}_{csvFile.filename}"
+    job = {
+        "id": job_id,
+        "status": "pending",
+        "config": {"analysisType": analysisType, "filters": filters_dict, "visualization": visualization_dict},
+        "createdAt": datetime.utcnow().isoformat(),
+        "startedAt": None,
+        "completedAt": None,
+        "error": None,
+        "progress": 0,
+        "results": None,
+        "file_path": str(file_path)
+    }
+    jobs_db[job_id] = job
 
-        MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
-        size = 0
-        with open(file_path, "wb") as f:
-            while chunk := await csvFile.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_MB * 1024 * 1024:
-                    raise HTTPException(status_code=413, detail="CSV too large")
-                f.write(chunk)
-
-        try:
-            filters_dict = json.loads(filters) if filters else {}
-            visualization_dict = json.loads(visualization) if visualization else {}
-        except json.JSONDecodeError:
-            filters_dict, visualization_dict = {}, {}
-
-        job = {
-            "id": job_id,
-            "status": "pending",
-            "config": {"analysisType": analysisType, "filters": filters_dict, "visualization": visualization_dict},
-            "createdAt": datetime.utcnow().isoformat(),
-            "startedAt": None,
-            "completedAt": None,
-            "error": None,
-            "progress": 0,
-            "results": None,
-            "file_path": str(file_path)
-        }
-        jobs_db[job_id] = job
-
-        import asyncio
-        asyncio.create_task(process_job(job_id))
-        logger.info(f"Job {job_id} created")
-        return JobResponse(**job)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("create_job failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    asyncio.create_task(process_job(job_id))
+    logger.info("Job %s created", job_id)
+    return JobResponse(**job)
 
 async def process_job(job_id: str):
     def cancelled() -> bool:
         return jobs_db.get(job_id, {}).get("status") == "cancelled"
 
-    try:
-        logger.info(f"Starting job {job_id}")
-        job = jobs_db[job_id]
-        job["status"] = "running"
-        job["startedAt"] = datetime.utcnow().isoformat()
-        job["progress"] = 10
+    async with job_semaphore:
+        try:
+            job = jobs_db[job_id]
+            job.update(status="running", startedAt=datetime.utcnow().isoformat(), progress=10)
+            logger.info("Starting job %s", job_id)
 
-        processor = DataProcessor(ef_kg_per_km=float(os.environ.get("EF_KG_PER_KM", "0.192")))
-        df = pd.read_csv(job["file_path"])
-        if cancelled(): return
+            # Read CSV; keep only columns we use for speed
+            usecols = ["randomized_id","lat","lng","spd","azm","alt"]
+            df = pd.read_csv(job["file_path"], usecols=lambda c: c in usecols or True)
+            cols = [c for c in usecols if c in df.columns]
+            df = df[cols] if cols else df  # be permissive
+            if cancelled(): return
 
-        # optional filters (bbox, vehicleIds, dateFrom/dateTo)
-        df = processor.apply_filters(df, job["config"]["filters"])
-        if cancelled(): return
+            # Configure processing
+            processor = DataProcessor(
+                ef_kg_per_km=float(os.environ.get("EF_KG_PER_KM", "0.192")),
+                max_rows=int(os.environ.get("MAX_PROCESS_ROWS", "50000")),
+            )
 
-        original_size = len(df)
-        MAX_ROWS = int(os.environ.get('MAX_PROCESS_ROWS', '50000'))
-        if original_size > MAX_ROWS:
-            df = processor.safe_sample(df, MAX_ROWS)
-        job["progress"] = 30
+            # Filter/sampling
+            df = processor.apply_filters(df, job["config"]["filters"])
+            df = processor.safe_sample(df)  # deterministic thinning if needed
+            job["progress"] = 30
+            if cancelled(): return
 
-        # speed (m/s -> km/h) based on your schema
-        if "spd" in df.columns:
-            df["speed_kmh"] = df["spd"].astype(float) * 3.6
-        else:
-            df["speed_kmh"] = np.nan
+            # Enrich (speed_kmh etc.)
+            processor.ensure_speed_kmh(df)
 
-        analysis_type = job["config"]["analysisType"]
-        if analysis_type == "ghg":
-            df = processor.add_segment_distance_and_emissions(df)
+            analysis_type = job["config"]["analysisType"].strip().lower()
+            generator = HeatmapGenerator()
 
-        job["progress"] = 50
+            # Reconstruct paths ONCE when needed (popular-routes, endpoints, ghg, trajectories)
+            segments = None
+            if analysis_type in {"popular-routes","endpoints","trajectories","ghg"}:
+                cfg = PathReconstructionConfig()  # default tuned params
+                segments = processor.reconstruct_paths(df, cfg)   # edges with distances & emissions
+                job["progress"] = 55
+                if cancelled(): return
 
-        generator = HeatmapGenerator()
-        if analysis_type == "popular-routes":
-            map_html = generator.generate_popular_routes_heatmap(df)
-        elif analysis_type == "endpoints":
-            map_html = generator.generate_endpoints_heatmap(df)
-        elif analysis_type == "speed":
-            map_html = generator.generate_speed_heatmap(df)
-        elif analysis_type == "trajectories":
-            map_html = generator.generate_demand_density_heatmap(df)  # trajectories summary
-        elif analysis_type == "ghg":
-            map_html = generator.generate_ghg_emissions_heatmap(df)
-        else:
-            raise ValueError(f"Unknown analysis type: {analysis_type}")
+            # Generate maps
+            if analysis_type == "popular-routes":
+                map_html = generator.generate_route_density_map(
+                    df=df, segments=segments, title="Popular Routes (Azimuth-aware)",
+                    legend=LegendSpec(title="Route Density", unit="km length per cell", notes="Meter-based grid; azimuth-aware path reconstruction")
+                )
+            elif analysis_type == "endpoints":
+                map_html = generator.generate_endpoints_map(
+                    df=df, segments=segments, title="Trip Endpoints (Green=Pickup, Red=Dropoff)",
+                    legend=LegendSpec(title="Endpoints", unit="clustered points", notes="Derived from azimuth-aware path reconstruction")
+                )
+            elif analysis_type == "speed":
+                # Choose the semantics you want:
+                # A) Average speed per location (street): red=fast (highways), green=slow
+                map_html = generator.generate_avg_speed_map(
+                    df=df,
+                    title="Average Speed Heat Map (Red = Fast)",
+                    legend=LegendSpec(title="Average Speed", unit="km/h",
+                                    notes="Per 80 m cell; colors clipped to 5th–95th percentile"),
+                    cell_m=80.0,
+                    red_is_fast=True   # set False if you want red=slow
+                )
+            elif analysis_type == "trajectories":
+                map_html = generator.generate_trajectory_demand_map(
+                    df=df, segments=segments, title="Demand Density (Presence + Endpoints)",
+                    legend=LegendSpec(title="Demand Density", unit="normalized presence", notes="Meter-based grid with endpoint boosting")
+                )
+            elif analysis_type == "ghg":
+                if segments is None or "dist_km" not in segments.columns:
+                    raise ValueError("GHG requires path reconstruction to compute distance")
+                map_html = generator.generate_ghg_map(
+                    segments=segments, title="GHG Emissions Heat Map (acid palette)",
+                    legend=LegendSpec(title="GHG Emissions", unit="kg CO₂e per cell", notes=f"EF={processor.ef_kg_per_km:.3f} kg/km; meter-based grid")
+                )
+            else:
+                raise HTTPException(status_code=400, detail=f"Unknown analysis type: {analysis_type}")
 
-        job["progress"] = 80
+            job["progress"] = 80
 
-        map_path = RESULTS_DIR / f"{job_id}.html"
-        with open(map_path, "w", encoding="utf-8") as f:
-            f.write(map_html)
+            # Save map
+            map_path = RESULTS_DIR / f"{job_id}.html"
+            with open(map_path, "w", encoding="utf-8") as f:
+                f.write(map_html)
 
-        stats = processor.calculate_statistics(df, analysis_type)
-        if original_size > MAX_ROWS:
-            stats["note"] = f"Data sampled from {original_size} to {len(df)} rows for performance"
+            # Stats
+            stats = processor.calculate_statistics(df, segments, analysis_type)
+            job["status"] = "completed"
+            job["completedAt"] = datetime.utcnow().isoformat()
+            job["progress"] = 100
+            job["results"] = {"mapUrl": f"/api/maps/{job_id}.html", "statistics": stats}
+            logger.info("Job %s completed", job_id)
 
-        job["status"] = "completed"
-        job["completedAt"] = datetime.utcnow().isoformat()
-        job["progress"] = 100
-        job["results"] = {"mapUrl": f"/api/maps/{job_id}.html", "statistics": stats}
-        logger.info(f"Job {job_id} completed")
-
-    except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}")
-        logger.error(traceback.format_exc())
-        job = jobs_db.get(job_id, {})
-        job["status"] = "failed"
-        job["error"] = str(e)
-        job["completedAt"] = datetime.utcnow().isoformat()
+        except Exception as e:
+            logger.error("Job %s failed: %s", job_id, e)
+            logger.error(traceback.format_exc())
+            job = jobs_db.get(job_id, {})
+            job["status"] = "failed"
+            job["error"] = str(e)
+            job["completedAt"] = datetime.utcnow().isoformat()
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str):
@@ -218,7 +242,6 @@ async def cancel_job(job_id: str):
 
 @app.get("/api/maps/{filename}")
 async def get_map(filename: str):
-    # stop path traversal
     candidate = (RESULTS_DIR / filename).resolve()
     if RESULTS_DIR.resolve() not in candidate.parents and candidate != RESULTS_DIR.resolve():
         raise HTTPException(status_code=400, detail="Invalid filename")

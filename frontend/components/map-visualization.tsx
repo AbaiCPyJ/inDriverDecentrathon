@@ -70,22 +70,6 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
     }
   }
 
-  const getMapTitle = () => {
-    switch (type) {
-      case "popular-routes":
-        return "Popular Routes Visualization"
-      case "endpoints":
-        return "Trip Endpoints Heatmap"
-      case "trajectories":
-        return "Trip Trajectories Map"
-      case "speed":
-        return "Speed Analysis Map"
-      case "ghg":
-        return "GHG Emissions Heatmap"
-      default:
-        return "Map Visualization"
-    }
-  }
 
   const getMapDescription = () => {
     switch (type) {
@@ -104,6 +88,36 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
     }
   }
 
+  const getMapTitle = () => {
+    if (type === "speed" && job?.results?.statistics?.speedPercentiles) {
+      return "Average Speed Heat Map"
+    }
+    switch (type) {
+      case "popular-routes":
+        return "Popular Routes Visualization"
+      case "endpoints":
+        return "Trip Endpoints Heatmap"
+      case "trajectories":
+        return "Trip Trajectories Map"
+      case "speed":
+        return "Traffic Congestion Map"
+      case "ghg":
+        return "GHG Emissions Heatmap"
+      default:
+        return "Map Visualization"
+    }
+  }
+
+  const getAnalysisNote = () => {
+    if (type === "ghg") {
+      return "Acid color palette: higher intensity = more kg CO₂e"
+    }
+    if (type === "speed" && job?.results?.statistics?.speedPercentiles) {
+      return "Legend shows Average Speed (km/h)"
+    }
+    return null
+  }
+
   return (
     <div className="space-y-4">
       {/* Map Controls */}
@@ -111,6 +125,9 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
         <div>
           <h3 className="text-lg font-medium">{getMapTitle()}</h3>
           <p className="text-sm text-muted-foreground">{getMapDescription()}</p>
+          {getAnalysisNote() && (
+            <p className="text-sm text-blue-600 font-medium mt-1">{getAnalysisNote()}</p>
+          )}
           {job?.id && <p className="text-xs text-muted-foreground">Job ID: {job.id}</p>}
         </div>
 
@@ -226,34 +243,140 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
 
       {/* Map Statistics */}
       {status === "completed" && job?.results?.statistics && (
-        <div className="grid grid-cols-4 gap-4">
-          <Card className="p-4">
-            <div className="text-2xl font-bold text-green-600">
-              {job.results.statistics.totalRecords?.toLocaleString() || "N/A"}
-            </div>
-            <div className="text-sm text-muted-foreground">Records processed</div>
-          </Card>
+        <div className="space-y-4">
+          {/* Primary v2.0.0 Statistics */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {/* Distance */}
+            {job.results.statistics.totalDistanceKm !== undefined && (
+              <Card className="p-4">
+                <div className="text-2xl font-bold text-green-600">
+                  {job.results.statistics.totalDistanceKm.toFixed(1)} km
+                </div>
+                <div className="text-sm text-muted-foreground">Total Distance</div>
+              </Card>
+            )}
 
-          <Card className="p-4">
-            <div className="text-2xl font-bold">
-              {job.results.statistics.uniqueVehicles?.toLocaleString() || "N/A"}
-            </div>
-            <div className="text-sm text-muted-foreground">Unique vehicles</div>
-          </Card>
+            {/* Total Emissions */}
+            {job.results.statistics.totalEmissionsKgCO2e !== undefined && (
+              <Card className="p-4">
+                <div className="text-2xl font-bold text-orange-600">
+                  {job.results.statistics.totalEmissionsKgCO2e.toFixed(2)} kg
+                </div>
+                <div className="text-sm text-muted-foreground">Total Emissions (CO₂e)</div>
+              </Card>
+            )}
 
-          <Card className="p-4">
-            <div className="text-2xl font-bold">
-              {job.results.statistics.avgSpeed ? `${job.results.statistics.avgSpeed} km/h` : "N/A"}
-            </div>
-            <div className="text-sm text-muted-foreground">Average speed</div>
-          </Card>
+            {/* Emissions per Vehicle */}
+            {job.results.statistics.emissionsPerVehicleKgCO2e !== undefined && (
+              <Card className="p-4">
+                <div className="text-2xl font-bold text-red-600">
+                  {job.results.statistics.emissionsPerVehicleKgCO2e.toFixed(3)} kg
+                </div>
+                <div className="text-sm text-muted-foreground">Emissions per Vehicle (CO₂e)</div>
+              </Card>
+            )}
 
-          <Card className="p-4">
-            <div className="text-2xl font-bold">
-              {job.results.statistics.maxSpeed ? `${job.results.statistics.maxSpeed} km/h` : "N/A"}
+            {/* Congestion Areas */}
+            {job.results.statistics.congestionAreas !== undefined && (
+              <Card className="p-4">
+                <div className="text-2xl font-bold text-yellow-600">
+                  {job.results.statistics.congestionAreas.toLocaleString()}
+                </div>
+                <div className="text-sm text-muted-foreground">Congestion Areas</div>
+              </Card>
+            )}
+          </div>
+
+          {/* Speed Percentiles */}
+          {job.results.statistics.speedPercentiles && (
+            <Card className="p-4">
+              <h4 className="text-lg font-medium mb-3">Speed Percentiles</h4>
+              <div className="grid grid-cols-4 gap-4">
+                <div className="text-center">
+                  <div className="text-xl font-bold text-blue-600">
+                    {job.results.statistics.speedPercentiles.p25.toFixed(1)} km/h
+                  </div>
+                  <div className="text-sm text-muted-foreground">P25</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-xl font-bold text-blue-600">
+                    {job.results.statistics.speedPercentiles.p50.toFixed(1)} km/h
+                  </div>
+                  <div className="text-sm text-muted-foreground">P50 (Median)</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-xl font-bold text-blue-600">
+                    {job.results.statistics.speedPercentiles.p75.toFixed(1)} km/h
+                  </div>
+                  <div className="text-sm text-muted-foreground">P75</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-xl font-bold text-blue-600">
+                    {job.results.statistics.speedPercentiles.p95.toFixed(1)} km/h
+                  </div>
+                  <div className="text-sm text-muted-foreground">P95</div>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {/* Legacy Statistics (if new fields not available) */}
+          {(!job.results.statistics.totalDistanceKm && !job.results.statistics.speedPercentiles) && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Card className="p-4">
+                <div className="text-2xl font-bold text-green-600">
+                  {job.results.statistics.totalRecords?.toLocaleString() || "N/A"}
+                </div>
+                <div className="text-sm text-muted-foreground">Records processed</div>
+              </Card>
+
+              <Card className="p-4">
+                <div className="text-2xl font-bold">
+                  {job.results.statistics.uniqueVehicles?.toLocaleString() || "N/A"}
+                </div>
+                <div className="text-sm text-muted-foreground">Unique vehicles</div>
+              </Card>
+
+              <Card className="p-4">
+                <div className="text-2xl font-bold">
+                  {job.results.statistics.avgSpeed ? `${job.results.statistics.avgSpeed} km/h` : "N/A"}
+                </div>
+                <div className="text-sm text-muted-foreground">Average speed</div>
+              </Card>
+
+              <Card className="p-4">
+                <div className="text-2xl font-bold">
+                  {job.results.statistics.maxSpeed ? `${job.results.statistics.maxSpeed} km/h` : "N/A"}
+                </div>
+                <div className="text-sm text-muted-foreground">Max speed</div>
+              </Card>
             </div>
-            <div className="text-sm text-muted-foreground">Max speed</div>
-          </Card>
+          )}
+
+          {/* Additional Statistics (any other fields) */}
+          {Object.entries(job.results.statistics).filter(([key]) => 
+            !['totalDistanceKm', 'totalEmissionsKgCO2e', 'emissionsPerVehicleKgCO2e', 'speedPercentiles', 'congestionAreas', 'totalRecords', 'uniqueVehicles', 'avgSpeed', 'maxSpeed', 'note'].includes(key)
+          ).length > 0 && (
+            <Card className="p-4">
+              <h4 className="text-lg font-medium mb-3">Additional Statistics</h4>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                {Object.entries(job.results.statistics)
+                  .filter(([key]) => 
+                    !['totalDistanceKm', 'totalEmissionsKgCO2e', 'emissionsPerVehicleKgCO2e', 'speedPercentiles', 'congestionAreas', 'totalRecords', 'uniqueVehicles', 'avgSpeed', 'maxSpeed', 'note'].includes(key)
+                  )
+                  .map(([key, value]) => (
+                    <div key={key} className="text-center">
+                      <div className="text-lg font-bold text-gray-600">
+                        {typeof value === 'number' ? value.toLocaleString() : String(value)}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </Card>
+          )}
         </div>
       )}
       

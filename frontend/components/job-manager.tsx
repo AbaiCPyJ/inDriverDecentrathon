@@ -111,9 +111,6 @@ export function JobManager({ jobs, currentJobId, onClose, onSelectJob, onCancelJ
 
                       <div className="text-xs text-muted-foreground space-y-1">
                         <div>Created {formatDistanceToNow(new Date(job.createdAt))} ago</div>
-                        <div>
-                          {job.config.dateRange.start} to {job.config.dateRange.end}
-                        </div>
                         {job.progress && (
                           <div className="flex items-center gap-2">
                             <div className="flex-1 bg-muted rounded-full h-1">
@@ -210,18 +207,6 @@ export function JobManager({ jobs, currentJobId, onClose, onSelectJob, onCancelJ
                           <span className="text-muted-foreground">Analysis Type:</span>
                           <span>{getAnalysisTypeLabel(selectedJob.config.analysisType)}</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Date Range:</span>
-                          <span>
-                            {selectedJob.config.dateRange.start} to {selectedJob.config.dateRange.end}
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Time Range:</span>
-                          <span>
-                            {selectedJob.config.timeRange.start}:00 - {selectedJob.config.timeRange.end}:00
-                          </span>
-                        </div>
                         {selectedJob.config.filters.city && (
                           <div className="flex justify-between">
                             <span className="text-muted-foreground">City:</span>
@@ -270,9 +255,70 @@ export function JobManager({ jobs, currentJobId, onClose, onSelectJob, onCancelJ
                             {selectedJob.results.statistics && (
                               <div>
                                 <span className="text-muted-foreground">Statistics:</span>
-                                <pre className="text-xs bg-muted p-2 rounded mt-1 overflow-auto">
-                                  {JSON.stringify(selectedJob.results.statistics, null, 2)}
-                                </pre>
+                                <div className="mt-2 space-y-2">
+                                  {/* v2.0.0 Primary Stats */}
+                                  {selectedJob.results.statistics.totalDistanceKm !== undefined && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Total Distance:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.totalDistanceKm.toFixed(1)} km</span>
+                                    </div>
+                                  )}
+                                  {selectedJob.results.statistics.totalEmissionsKgCO2e !== undefined && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Total Emissions:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.totalEmissionsKgCO2e.toFixed(2)} kg CO₂e</span>
+                                    </div>
+                                  )}
+                                  {selectedJob.results.statistics.emissionsPerVehicleKgCO2e !== undefined && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Emissions per Vehicle:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.emissionsPerVehicleKgCO2e.toFixed(3)} kg CO₂e</span>
+                                    </div>
+                                  )}
+                                  {selectedJob.results.statistics.speedPercentiles && (
+                                    <div className="text-xs">
+                                      <span>Speed Percentiles:</span>
+                                      <div className="ml-2 mt-1 space-y-1">
+                                        <div className="flex justify-between">
+                                          <span>P50 (Median):</span>
+                                          <span className="font-medium">{selectedJob.results.statistics.speedPercentiles.p50.toFixed(1)} km/h</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span>P95:</span>
+                                          <span className="font-medium">{selectedJob.results.statistics.speedPercentiles.p95.toFixed(1)} km/h</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {selectedJob.results.statistics.congestionAreas !== undefined && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Congestion Areas:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.congestionAreas.toLocaleString()}</span>
+                                    </div>
+                                  )}
+
+                                  {/* Legacy stats as fallback */}
+                                  {(!selectedJob.results.statistics.totalDistanceKm && selectedJob.results.statistics.totalRecords) && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Records:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.totalRecords.toLocaleString()}</span>
+                                    </div>
+                                  )}
+                                  {(!selectedJob.results.statistics.speedPercentiles && selectedJob.results.statistics.avgSpeed) && (
+                                    <div className="flex justify-between text-xs">
+                                      <span>Avg Speed:</span>
+                                      <span className="font-medium">{selectedJob.results.statistics.avgSpeed} km/h</span>
+                                    </div>
+                                  )}
+
+                                  {/* Show full JSON for debugging if needed */}
+                                  <details className="mt-2">
+                                    <summary className="text-xs text-muted-foreground cursor-pointer">Raw Data</summary>
+                                    <pre className="text-xs bg-muted p-2 rounded mt-1 overflow-auto">
+                                      {JSON.stringify(selectedJob.results.statistics, null, 2)}
+                                    </pre>
+                                  </details>
+                                </div>
                               </div>
                             )}
                           </div>

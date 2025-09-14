@@ -17,6 +17,30 @@ export interface JobConfig {
   }
 }
 
+export interface JobStatistics {
+  // v2.0.0 new fields - strongly typed
+  totalDistanceKm?: number
+  totalEmissionsKgCO2e?: number
+  emissionsPerVehicleKgCO2e?: number
+  speedPercentiles?: {
+    p25: number
+    p50: number
+    p75: number
+    p95: number
+  }
+  congestionAreas?: number
+  
+  // Legacy fields (still supported)
+  totalRecords?: number
+  uniqueVehicles?: number
+  avgSpeed?: number
+  maxSpeed?: number
+  note?: string
+  
+  // Any other fields
+  [key: string]: any
+}
+
 export interface Job {
   id: string
   status: "pending" | "running" | "completed" | "failed"
@@ -28,7 +52,7 @@ export interface Job {
   progress?: number
   results?: {
     mapUrl: string
-    statistics: Record<string, any>
+    statistics: JobStatistics
   }
 }
 
