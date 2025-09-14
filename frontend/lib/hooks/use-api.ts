@@ -35,6 +35,23 @@ export function useJobs() {
     }
   }, [])
 
+  const createBatchJobs = useCallback(async (
+    csvFile: File, 
+    analysisTypes: JobConfig["analysisType"][], 
+    filters: JobConfig["filters"], 
+    visualization: JobConfig["visualization"]
+  ): Promise<Job[]> => {
+    const response = await api.createBatchJobs(csvFile, analysisTypes, filters, visualization)
+
+    if (response.success && response.data) {
+      setJobs((prev) => [...response.data!, ...prev])
+      return response.data
+    } else {
+      setError(response.error || "Failed to create batch jobs")
+      return []
+    }
+  }, [])
+
   const cancelJob = useCallback(async (jobId: string): Promise<boolean> => {
     const response = await api.cancelJob(jobId)
 
@@ -69,6 +86,7 @@ export function useJobs() {
     error,
     refetch: fetchJobs,
     createJob,
+    createBatchJobs,
     cancelJob,
     deleteJob,
   }

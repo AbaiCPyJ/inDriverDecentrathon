@@ -8,7 +8,7 @@ import { Loader2, RefreshCw, Download, Maximize2 } from "lucide-react"
 import type { Job } from "@/lib/api"
 
 interface MapVisualizationProps {
-  type: "popular-routes" | "endpoints" | "trajectories" | "speed"
+  type: "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
   status: "idle" | "running" | "completed" | "error"
   job?: Job | null // Job object with results
 }
@@ -24,11 +24,16 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
     endpoints: "/api/maps/endpoints.html",
     trajectories: "/api/maps/trajectories.html",
     speed: "/api/maps/speed.html",
+    ghg: "/api/maps/ghg.html",
   }
 
   useEffect(() => {
     if (status === "completed" && job?.results?.mapUrl) {
-      setMapUrl(job.results.mapUrl)
+      // Add cache-busting timestamp for fresh completed jobs
+      const url = job.results.mapUrl.includes('?ts=') 
+        ? job.results.mapUrl 
+        : `${job.results.mapUrl}?ts=${Date.now()}`
+      setMapUrl(url)
       setError(null)
     } else if (status === "completed") {
       // Fallback to mock URL if no job results
@@ -37,8 +42,11 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
     } else if (status === "error") {
       setError(job?.error || "Failed to generate map visualization")
       setMapUrl(null)
-    } else if (status === "running") {
-      setMapUrl(null)
+    } else if (status === "running" || status === "idle") {
+      // Keep existing map URL if available for instant tab switching
+      if (!mapUrl) {
+        setMapUrl(null)
+      }
       setError(null)
     }
   }, [status, type, job])
@@ -72,6 +80,8 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
         return "Trip Trajectories Map"
       case "speed":
         return "Speed Analysis Map"
+      case "ghg":
+        return "GHG Emissions Heatmap"
       default:
         return "Map Visualization"
     }
@@ -87,6 +97,8 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
         return "Visualizes actual trip paths and route variations"
       case "speed":
         return "Analyzes speed patterns across different road segments"
+      case "ghg":
+        return "Shows greenhouse gas emissions intensity across different route segments"
       default:
         return "Interactive map visualization"
     }
@@ -138,15 +150,35 @@ export function MapVisualization({ type, status, job }: MapVisualizationProps) {
       {/* Map Container */}
       <Card className="overflow-hidden">
         <div className="relative h-[600px] bg-muted/20">
-          {status === "running" && (
+          {status === "running" && !mapUrl && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/80 backdrop-blur-sm">
               <div className="text-center space-y-4">
                 <Loader2 className="h-8 w-8 animate-spin mx-auto text-green-600" />
                 <div>
                   <p className="font-medium">Generating {type.replace("-", " ")} visualization...</p>
                   <p className="text-sm text-muted-foreground">This may take a few moments</p>
+                  {job?.progress && job.progress > 0 && (
+                    <div className="mt-2">
+                      <div className="w-48 mx-auto bg-muted rounded-full h-2">
+                        <div
+                          className="bg-green-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${job.progress}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">{job.progress}% complete</p>
+                    </div>
+                  )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {status === "running" && mapUrl && (
+            <div className="absolute top-4 right-4 z-10">
+              <Badge variant="secondary" className="gap-1 bg-blue-100 text-blue-800">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Processing {job?.progress || 0}%
+              </Badge>
             </div>
           )}
 

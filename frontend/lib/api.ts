@@ -1,7 +1,7 @@
 // API client for inDrive Geotracks backend integration
 
 export interface JobConfig {
-  analysisType: "popular-routes" | "endpoints" | "trajectories" | "speed"
+  analysisType: "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
   csvFile?: File
   filters: {
     city?: string
@@ -118,6 +118,58 @@ class GeotracksAPI {
     return {
       success: true,
       data,
+    }
+  }
+
+  async createBatchJobs(csvFile: File, analysisTypes: JobConfig["analysisType"][], filters: JobConfig["filters"], visualization: JobConfig["visualization"]): Promise<ApiResponse<Job[]>> {
+    if (!csvFile) {
+      return {
+        success: false,
+        error: "CSV file is required",
+      }
+    }
+
+    try {
+      const jobs: Job[] = []
+      const errors: string[] = []
+
+      // Create all jobs in parallel
+      const promises = analysisTypes.map(analysisType => 
+        this.createJob({
+          analysisType,
+          csvFile,
+          filters,
+          visualization
+        })
+      )
+
+      const results = await Promise.allSettled(promises)
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value.success && result.value.data) {
+          jobs.push(result.value.data)
+        } else {
+          const error = result.status === 'fulfilled' ? result.value.error : result.reason
+          errors.push(`${analysisTypes[index]}: ${error}`)
+        }
+      })
+
+      if (jobs.length === 0) {
+        return {
+          success: false,
+          error: `All jobs failed: ${errors.join(', ')}`
+        }
+      }
+
+      return {
+        success: true,
+        data: jobs
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Batch job creation failed"
+      }
     }
   }
 

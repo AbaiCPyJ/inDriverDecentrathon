@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -9,52 +9,100 @@ import { Sidebar } from "@/components/sidebar"
 import { MapVisualization } from "@/components/map-visualization"
 import { JobStatus } from "@/components/job-status"
 import { JobManager } from "@/components/job-manager"
-import { Play, Square, RotateCcw, History } from "lucide-react"
+import { Play, Square, RotateCcw, History, Loader2 } from "lucide-react"
 import { useJobs, useJobPolling } from "@/lib/hooks/use-api"
-import type { JobConfig } from "@/lib/api"
+import { api, type JobConfig, type Job } from "@/lib/api"
+
+// Define the analysis types with consistent ordering
+const ANALYSIS_TYPES: Array<{ 
+  id: JobConfig["analysisType"], 
+  label: string 
+}> = [
+  { id: "popular-routes", label: "Popular Routes" },
+  { id: "endpoints", label: "Endpoints" },
+  { id: "trajectories", label: "Trajectories" },
+  { id: "speed", label: "Speed Analysis" },
+  { id: "ghg", label: "GHG Emissions" },
+]
 
 export function DashboardLayout() {
-  const [activeTab, setActiveTab] = useState("popular-routes")
-  const [currentJobId, setCurrentJobId] = useState<string | null>(null)
-  const [jobStatus, setJobStatus] = useState<"idle" | "running" | "completed" | "error">("idle")
+  const [activeTab, setActiveTab] = useState<JobConfig["analysisType"]>("popular-routes")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showJobManager, setShowJobManager] = useState(false)
-
-  const { jobs, createJob, cancelJob, loading: jobsLoading, refetch: refetchJobs } = useJobs()
+  const [isRunningBatch, setIsRunningBatch] = useState(false)
   
-  // Poll for job updates when we have a current job
-  const { job: currentJob } = useJobPolling(currentJobId)
+  // Track jobs per analysis type
+  const [jobsByType, setJobsByType] = useState<Record<JobConfig["analysisType"], Job | null>>({
+    "popular-routes": null,
+    "endpoints": null,
+    "trajectories": null,
+    "speed": null,
+    "ghg": null,
+  })
+
+  // Track map URL cache with timestamps for cache busting
+  const [mapCache, setMapCache] = useState<Record<string, { url: string, timestamp: number }>>({})
+
+  const { jobs, loading: jobsLoading, refetch: refetchJobs } = useJobs()
+
+  // Update jobsByType when jobs change
+  useEffect(() => {
+    const newJobsByType = { ...jobsByType }
+    
+    // Find the latest job for each analysis type
+    ANALYSIS_TYPES.forEach(({ id }) => {
+      const typeJobs = jobs.filter(job => job.config.analysisType === id)
+      if (typeJobs.length > 0) {
+        // Get the most recent job
+        const latestJob = typeJobs.sort((a, b) => 
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )[0]
+        newJobsByType[id] = latestJob
+      }
+    })
+    
+    setJobsByType(newJobsByType)
+  }, [jobs])
+
+  // Update map cache when jobs complete
+  useEffect(() => {
+    const newCache = { ...mapCache }
+    let cacheUpdated = false
+
+    Object.entries(jobsByType).forEach(([type, job]) => {
+      if (job?.status === "completed" && job.results?.mapUrl) {
+        const cacheKey = `${type}-${job.id}`
+        if (!newCache[cacheKey]) {
+          newCache[cacheKey] = {
+            url: `${job.results.mapUrl}?ts=${Date.now()}`,
+            timestamp: Date.now()
+          }
+          cacheUpdated = true
+        }
+      }
+    })
+
+    if (cacheUpdated) {
+      setMapCache(newCache)
+    }
+  }, [jobsByType])
+
+  // Poll for updates on running jobs
+  const runningJobs = Object.values(jobsByType).filter(job => 
+    job && (job.status === "pending" || job.status === "running")
+  )
 
   useEffect(() => {
-    if (currentJob) {
-      switch (currentJob.status) {
-        case "pending":
-        case "running":
-          setJobStatus("running")
-          break
-        case "completed":
-          setJobStatus("completed")
-          // Refresh jobs list to get updated job
-          refetchJobs()
-          break
-        case "failed":
-          setJobStatus("error")
-          break
-      }
-    }
-  }, [currentJob, refetchJobs])
+    if (runningJobs.length === 0) return
+
+    const pollInterval = setInterval(async () => {
+      await refetchJobs()
+    }, 2000)
+
+    return () => clearInterval(pollInterval)
+  }, [runningJobs.length, refetchJobs])
 
   const handleRunAnalysis = async () => {
-    if (jobStatus === "running" && currentJobId) {
-      // Cancel current job
-      const success = await cancelJob(currentJobId)
-      if (success) {
-        setJobStatus("idle")
-        setCurrentJobId(null)
-      }
-      return
-    }
-
     // Get uploaded file
     const uploadedFile = (window as any).uploadedCsvFile
     if (!uploadedFile) {
@@ -62,33 +110,84 @@ export function DashboardLayout() {
       return
     }
 
-    // Create new job
-    const jobConfig: JobConfig = {
-      analysisType: activeTab as any,
-      csvFile: uploadedFile,
-      filters: {
-        city: "all",
-        minTrips: 10,
-        maxDistance: 50,
-      },
-      visualization: {
-        showHeatmap: true,
-        showClusters: false,
-        intensity: "medium",
-      },
-    }
+    setIsRunningBatch(true)
+    
+    try {
+      // Create all analysis jobs in parallel
+      const response = await api.createBatchJobs(
+        uploadedFile,
+        ANALYSIS_TYPES.map(t => t.id),
+        {
+          city: "all",
+          minTrips: 10,
+          maxDistance: 50,
+        },
+        {
+          showHeatmap: true,
+          showClusters: false,
+          intensity: "medium",
+        }
+      )
 
-    const newJob = await createJob(jobConfig)
-    if (newJob) {
-      setCurrentJobId(newJob.id)
-      setJobStatus("running")
+      if (response.success && response.data) {
+        // Refresh jobs to get the new batch
+        await refetchJobs()
+      } else {
+        alert(`Failed to create batch jobs: ${response.error}`)
+      }
+    } catch (error) {
+      alert(`Error creating batch jobs: ${error}`)
+    } finally {
+      setIsRunningBatch(false)
+    }
+  }
+
+  const handleCancelAllJobs = async () => {
+    const runningJobIds = Object.values(jobsByType)
+      .filter(job => job && (job.status === "pending" || job.status === "running"))
+      .map(job => job!.id)
+
+    if (runningJobIds.length === 0) return
+
+    try {
+      await Promise.all(runningJobIds.map(id => api.cancelJob(id)))
+      await refetchJobs()
+    } catch (error) {
+      console.error("Error cancelling jobs:", error)
     }
   }
 
   const handleReset = () => {
-    setJobStatus("idle")
-    setCurrentJobId(null)
+    setJobsByType({
+      "popular-routes": null,
+      "endpoints": null,
+      "trajectories": null,
+      "speed": null,
+      "ghg": null,
+    })
+    setMapCache({})
   }
+
+  const getTabStatus = (type: JobConfig["analysisType"]) => {
+    const job = jobsByType[type]
+    if (!job) return "idle"
+    if (job.status === "pending" || job.status === "running") return "running"
+    if (job.status === "completed") return "completed"
+    return "error"
+  }
+
+  const getTabProgress = (type: JobConfig["analysisType"]) => {
+    const job = jobsByType[type]
+    return job?.progress || 0
+  }
+
+  const getMapJob = (type: JobConfig["analysisType"]) => {
+    return jobsByType[type]
+  }
+
+  const anyJobsRunning = Object.values(jobsByType).some(job => 
+    job && (job.status === "pending" || job.status === "running")
+  )
 
   return (
     <div className="min-h-screen bg-background">
@@ -108,7 +207,14 @@ export function DashboardLayout() {
           </div>
 
           <div className="flex items-center gap-2">
-            <JobStatus status={jobStatus} />
+            {anyJobsRunning ? (
+              <Badge variant="secondary" className="gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Processing ({runningJobs.length} jobs)
+              </Badge>
+            ) : (
+              <Badge variant="outline">Ready</Badge>
+            )}
 
             <Button variant="outline" size="sm" onClick={() => setShowJobManager(!showJobManager)} className="gap-2">
               <History className="h-4 w-4" />
@@ -118,14 +224,19 @@ export function DashboardLayout() {
             <Button
               variant="outline"
               size="sm"
-              onClick={handleRunAnalysis}
-              disabled={jobsLoading}
+              onClick={anyJobsRunning ? handleCancelAllJobs : handleRunAnalysis}
+              disabled={jobsLoading || isRunningBatch}
               className="gap-2 bg-transparent"
             >
-              {jobStatus === "running" ? (
+              {isRunningBatch ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Starting...
+                </>
+              ) : anyJobsRunning ? (
                 <>
                   <Square className="h-4 w-4" />
-                  Stop
+                  Stop All
                 </>
               ) : (
                 <>
@@ -150,10 +261,18 @@ export function DashboardLayout() {
         {showJobManager && (
           <JobManager
             jobs={jobs}
-            currentJobId={currentJobId}
+            currentJobId={null}
             onClose={() => setShowJobManager(false)}
-            onSelectJob={setCurrentJobId}
-            onCancelJob={cancelJob}
+            onSelectJob={() => {}}
+            onCancelJob={async (jobId) => {
+              try {
+                await api.cancelJob(jobId)
+                await refetchJobs()
+                return true
+              } catch {
+                return false
+              }
+            }}
           />
         )}
 
@@ -161,93 +280,60 @@ export function DashboardLayout() {
         <main className={`flex-1 transition-all duration-300 ${sidebarCollapsed ? "ml-16" : "ml-80"}`}>
           <div className="p-6">
             <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-              <TabsList className="grid w-full grid-cols-4 bg-muted/50">
-                <TabsTrigger
-                  value="popular-routes"
-                  className="data-[state=active]:bg-green-600 data-[state=active]:text-white"
-                >
-                  Popular Routes
-                </TabsTrigger>
-                <TabsTrigger
-                  value="endpoints"
-                  className="data-[state=active]:bg-green-600 data-[state=active]:text-white"
-                >
-                  Endpoints
-                </TabsTrigger>
-                <TabsTrigger
-                  value="trajectories"
-                  className="data-[state=active]:bg-green-600 data-[state=active]:text-white"
-                >
-                  Trajectories
-                </TabsTrigger>
-                <TabsTrigger value="speed" className="data-[state=active]:bg-green-600 data-[state=active]:text-white">
-                  Speed Analysis
-                </TabsTrigger>
+              <TabsList className="grid w-full grid-cols-5 bg-muted/50">
+                {ANALYSIS_TYPES.map(({ id, label }) => {
+                  const status = getTabStatus(id)
+                  const progress = getTabProgress(id)
+                  
+                  return (
+                    <TabsTrigger
+                      key={id}
+                      value={id}
+                      className="data-[state=active]:bg-green-600 data-[state=active]:text-white relative"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span>{label}</span>
+                        {status === "running" && (
+                          <div className="flex items-center gap-1">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <span className="text-xs">({progress}%)</span>
+                          </div>
+                        )}
+                        {status === "completed" && (
+                          <div className="h-2 w-2 bg-green-400 rounded-full" />
+                        )}
+                        {status === "error" && (
+                          <div className="h-2 w-2 bg-red-400 rounded-full" />
+                        )}
+                      </div>
+                    </TabsTrigger>
+                  )
+                })}
               </TabsList>
 
-              <TabsContent value="popular-routes" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      Popular Routes Analysis
-                      <Badge variant="outline" className="text-xs">
-                        {jobStatus === "completed" ? "Updated" : "Pending"}
-                      </Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <MapVisualization type="popular-routes" status={jobStatus} job={currentJob} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="endpoints" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      Trip Endpoints Heatmap
-                      <Badge variant="outline" className="text-xs">
-                        {jobStatus === "completed" ? "Updated" : "Pending"}
-                      </Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <MapVisualization type="endpoints" status={jobStatus} job={currentJob} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="trajectories" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      Trip Trajectories
-                      <Badge variant="outline" className="text-xs">
-                        {jobStatus === "completed" ? "Updated" : "Pending"}
-                      </Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <MapVisualization type="trajectories" status={jobStatus} job={currentJob} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="speed" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      Speed Analysis
-                      <Badge variant="outline" className="text-xs">
-                        {jobStatus === "completed" ? "Updated" : "Pending"}
-                      </Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <MapVisualization type="speed" status={jobStatus} job={currentJob} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
+              {ANALYSIS_TYPES.map(({ id, label }) => (
+                <TabsContent key={id} value={id} className="space-y-4">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        {label}
+                        <Badge variant="outline" className="text-xs">
+                          {getTabStatus(id) === "completed" ? "Updated" : 
+                           getTabStatus(id) === "running" ? `Processing ${getTabProgress(id)}%` :
+                           getTabStatus(id) === "error" ? "Error" : "Pending"}
+                        </Badge>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <MapVisualization 
+                        type={id} 
+                        status={getTabStatus(id)} 
+                        job={getMapJob(id)} 
+                      />
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+              ))}
             </Tabs>
           </div>
         </main>

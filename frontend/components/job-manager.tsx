@@ -57,6 +57,8 @@ export function JobManager({ jobs, currentJobId, onClose, onSelectJob, onCancelJ
         return "Trajectories"
       case "speed":
         return "Speed Analysis"
+      case "ghg":
+        return "GHG Emissions"
       default:
         return type
     }
