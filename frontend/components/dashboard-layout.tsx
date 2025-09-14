@@ -103,8 +103,9 @@ export function DashboardLayout() {
   }, [runningJobs.length, refetchJobs])
 
   const handleRunAnalysis = async () => {
-    // Get uploaded file
+    // Get uploaded file and settings
     const uploadedFile = (window as any).uploadedCsvFile
+    const maxProcessRows = (window as any).maxProcessRows
     if (!uploadedFile) {
       alert("Please upload a CSV file first")
       return
@@ -126,7 +127,8 @@ export function DashboardLayout() {
           showHeatmap: true,
           showClusters: false,
           intensity: "medium",
-        }
+        },
+        maxProcessRows
       )
 
       if (response.success && response.data) {

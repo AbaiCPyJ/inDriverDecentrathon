@@ -66,6 +66,7 @@ class DataProcessor:
     def safe_sample(self, df: pd.DataFrame) -> pd.DataFrame:
         """Deterministic thin if rows exceed cap; preserve per-vehicle representation."""
         n = len(df)
+        self._original_count = n  # Store original count for statistics
         if n <= self.max_rows:
             return df
         if "randomized_id" not in df:
@@ -228,31 +229,43 @@ class DataProcessor:
             "maxSpeed": round(float(df["speed_kmh"].max()) if "speed_kmh" in df else 0.0, 2),
             "minSpeed": round(float(df["speed_kmh"].min()) if "speed_kmh" in df else 0.0, 2),
         }
-        if analysis_type in {"popular-routes","trajectories","endpoints","ghg"} and segments is not None:
+        
+        # Add distance and emissions for all types that use segments
+        if analysis_type in {"popular-routes","trajectories","endpoints","ghg"} and segments is not None and len(segments) > 0:
             total_km = float(segments["dist_km"].sum())
             stats["totalDistanceKm"] = round(total_km, 2)
-            if analysis_type == "ghg":
-                stats["totalEmissionsKgCO2e"] = round(float(segments["segment_kg_co2e"].sum()), 2)
-                vid = df["randomized_id"].nunique() if "randomized_id" in df else 1
-                stats["emissionsPerVehicleKgCO2e"] = round(stats["totalEmissionsKgCO2e"] / max(1, vid), 2)
-        if analysis_type == "speed":
-            s = df["speed_kmh"].dropna()
-            if len(s):
-                stats["speedPercentiles"] = {
-                    "p25": round(float(s.quantile(0.25)), 2),
-                    "p50": round(float(s.quantile(0.50)), 2),
-                    "p75": round(float(s.quantile(0.75)), 2),
-                    "p95": round(float(s.quantile(0.95)), 2),
-                }
-                # low-speed hotspots (cluster count)
-                low = df[df["speed_kmh"] < max(5.0, float(s.quantile(0.25)))]
-                if len(low) >= 5:
-                    lat0 = float(low["lat"].mean())
-                    mx, my = _meters_per_degree(lat0)
-                    eps_m = 120.0
-                    eps_deg = eps_m / ((mx + my)/2)  # rough, ok for clustering
-                    labels = DBSCAN(eps=eps_deg, min_samples=8).fit(low[["lat","lng"]].values).labels_
-                    stats["congestionAreas"] = int(len(set(labels)) - (1 if -1 in labels else 0))
-                else:
-                    stats["congestionAreas"] = 0
+            
+            # Calculate emissions for all segment-based analyses
+            total_emissions = float(segments["segment_kg_co2e"].sum()) if "segment_kg_co2e" in segments else 0.0
+            stats["totalEmissionsKgCO2e"] = round(total_emissions, 2)
+            vid = df["randomized_id"].nunique() if "randomized_id" in df else 1
+            stats["emissionsPerVehicleKgCO2e"] = round(total_emissions / max(1, vid), 3)
+        
+        # Add speed percentiles for all analysis types (useful for all maps)
+        s = df["speed_kmh"].dropna()
+        if len(s) > 0:
+            stats["speedPercentiles"] = {
+                "p25": round(float(s.quantile(0.25)), 2),
+                "p50": round(float(s.quantile(0.50)), 2),
+                "p75": round(float(s.quantile(0.75)), 2),
+                "p95": round(float(s.quantile(0.95)), 2),
+            }
+            
+            # Congestion analysis for all types (especially useful for speed, but informative for others)
+            low = df[df["speed_kmh"] < max(5.0, float(s.quantile(0.25)))]
+            if len(low) >= 5:
+                lat0 = float(low["lat"].mean())
+                mx, my = _meters_per_degree(lat0)
+                eps_m = 120.0
+                eps_deg = eps_m / ((mx + my)/2)  # rough, ok for clustering
+                labels = DBSCAN(eps=eps_deg, min_samples=8).fit(low[["lat","lng"]].values).labels_
+                stats["congestionAreas"] = int(len(set(labels)) - (1 if -1 in labels else 0))
+            else:
+                stats["congestionAreas"] = 0
+        
+        # Add sampling note if data was reduced
+        original_count = getattr(self, '_original_count', len(df))
+        if original_count > self.max_rows:
+            stats["note"] = f"Data sampled to {self.max_rows:,} records for performance (from {original_count:,} total)"
+        
         return stats

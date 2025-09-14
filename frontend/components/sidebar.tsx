@@ -1,8 +1,6 @@
 "use client"
 
-import type React from "react"
-import * as React from "react"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,17 +15,20 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onCollapsedChange, activeTab }: SidebarProps) {
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  const [csvFile, setCsvFile] = useState<File | null>(null)
   const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading" | "success" | "error">("idle")
   const [fileStats, setFileStats] = useState<{ totalRecords: number; uniqueIds: number } | null>(null)
+  const [maxProcessRows, setMaxProcessRows] = useState<number>(50000)
 
-  // Store uploaded file globally for job creation
-  React.useEffect(() => {
-    if (uploadedFile && uploadStatus === "success") {
+  // Store uploaded file and settings globally for job creation
+  useEffect(() => {
+    if (csvFile && uploadStatus === "success") {
+      console.log('Storing file in window:', csvFile.name, 'with max rows:', maxProcessRows)
       // Store in window object for access by dashboard
-      (window as any).uploadedCsvFile = uploadedFile
+      ;(window as any).uploadedCsvFile = csvFile
+      ;(window as any).maxProcessRows = maxProcessRows
     }
-  }, [uploadedFile, uploadStatus])
+  }, [csvFile, uploadStatus, maxProcessRows])
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -38,7 +39,7 @@ export function Sidebar({ collapsed, onCollapsedChange, activeTab }: SidebarProp
       return
     }
 
-    setUploadedFile(file)
+    setCsvFile(file)
     setUploadStatus("uploading")
 
     try {
@@ -117,11 +118,11 @@ export function Sidebar({ collapsed, onCollapsedChange, activeTab }: SidebarProp
               </div>
             )}
 
-            {uploadStatus === "success" && uploadedFile && fileStats && (
+            {uploadStatus === "success" && csvFile && fileStats && (
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-sm text-green-600">
                   <CheckCircle className="h-4 w-4" />
-                  {uploadedFile.name} - Processing started automatically
+                  {csvFile.name} - Processing started automatically
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <Badge variant="secondary">{fileStats.totalRecords.toLocaleString()} records</Badge>
@@ -138,6 +139,37 @@ export function Sidebar({ collapsed, onCollapsedChange, activeTab }: SidebarProp
             )}
           </CardContent>
         </Card>
+
+        {/* Processing Settings */}
+        {uploadStatus === "success" && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Processing Settings</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-2">
+                <Label className="text-xs">Max Records to Process</Label>
+                <Input
+                  type="number"
+                  value={maxProcessRows}
+                  onChange={(e) => setMaxProcessRows(Number(e.target.value) || 50000)}
+                  min={1000}
+                  max={500000}
+                  step={1000}
+                  className="text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Higher values = better accuracy, longer processing time. 
+                  {fileStats && fileStats.totalRecords > maxProcessRows && (
+                    <span className="text-orange-600">
+                      {" "}Data will be sampled from {fileStats.totalRecords.toLocaleString()} total records.
+                    </span>
+                  )}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {uploadStatus === "idle" && (
           <div className="text-center py-8 text-muted-foreground">

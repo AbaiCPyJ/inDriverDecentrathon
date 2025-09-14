@@ -74,7 +74,8 @@ async def create_job(
     analysisType: str = Form(...),      # "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
     csvFile: UploadFile = File(...),
     filters: Optional[str] = Form("{}"),
-    visualization: Optional[str] = Form("{}")
+    visualization: Optional[str] = Form("{}"),
+    maxProcessRows: Optional[int] = Form(None)  # Optional override for max processing rows
 ):
     # minimal file/type checks + streamed write
     if not (csvFile.filename.endswith(".csv") or "csv" in (csvFile.content_type or "")):
@@ -101,7 +102,7 @@ async def create_job(
     job = {
         "id": job_id,
         "status": "pending",
-        "config": {"analysisType": analysisType, "filters": filters_dict, "visualization": visualization_dict},
+        "config": {"analysisType": analysisType, "filters": filters_dict, "visualization": visualization_dict, "maxProcessRows": maxProcessRows},
         "createdAt": datetime.utcnow().isoformat(),
         "startedAt": None,
         "completedAt": None,
@@ -133,10 +134,11 @@ async def process_job(job_id: str):
             df = df[cols] if cols else df  # be permissive
             if cancelled(): return
 
-            # Configure processing
+            # Configure processing with optional override
+            max_rows = job["config"].get("maxProcessRows") or int(os.environ.get("MAX_PROCESS_ROWS", "50000"))
             processor = DataProcessor(
                 ef_kg_per_km=float(os.environ.get("EF_KG_PER_KM", "0.192")),
-                max_rows=int(os.environ.get("MAX_PROCESS_ROWS", "50000")),
+                max_rows=max_rows,
             )
 
             # Filter/sampling

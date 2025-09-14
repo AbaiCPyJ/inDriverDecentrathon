@@ -3,6 +3,7 @@
 export interface JobConfig {
   analysisType: "popular-routes" | "endpoints" | "trajectories" | "speed" | "ghg"
   csvFile?: File
+  maxProcessRows?: number
   filters: {
     city?: string
     minTrips?: number
@@ -124,6 +125,9 @@ class GeotracksAPI {
     formData.append("analysisType", config.analysisType)
     formData.append("filters", JSON.stringify(config.filters))
     formData.append("visualization", JSON.stringify(config.visualization))
+    if (config.maxProcessRows) {
+      formData.append("maxProcessRows", config.maxProcessRows.toString())
+    }
 
     const response = await fetch(`${this.baseUrl}/api/jobs`, {
       method: "POST",
@@ -145,7 +149,7 @@ class GeotracksAPI {
     }
   }
 
-  async createBatchJobs(csvFile: File, analysisTypes: JobConfig["analysisType"][], filters: JobConfig["filters"], visualization: JobConfig["visualization"]): Promise<ApiResponse<Job[]>> {
+  async createBatchJobs(csvFile: File, analysisTypes: JobConfig["analysisType"][], filters: JobConfig["filters"], visualization: JobConfig["visualization"], maxProcessRows?: number): Promise<ApiResponse<Job[]>> {
     if (!csvFile) {
       return {
         success: false,
@@ -163,7 +167,8 @@ class GeotracksAPI {
           analysisType,
           csvFile,
           filters,
-          visualization
+          visualization,
+          maxProcessRows
         })
       )
 
