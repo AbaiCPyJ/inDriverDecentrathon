@@ -115,76 +115,197 @@ class HeatmapGenerator:
 
         return pd.DataFrame({"lat": lat, "lng": lng, "avg": avgs, "count": cnts})
 
+    def _add_flow_overlay(self, m: folium.Map, segments: pd.DataFrame, top_k: int = 250, min_len_km: float = 0.05):
+        """
+        Add animated directional flow lines (AntPath) for the strongest segments.
+        - Aggregates segments by rounded endpoints to denoise.
+        - Ranks by total km length so 'popular directions' pop.
+        """
+        if segments is None or len(segments) == 0:
+            return
+
+        seg = segments.copy()
+        # keep only meaningful moves
+        seg = seg[seg["dist_km"].astype(float) >= float(min_len_km)].copy()
+        if seg.empty:
+            return
+
+        # bucket endpoints to ~11 m cells (round 4 decimals)
+        seg["a_lat"] = seg["lat1"].round(4); seg["a_lng"] = seg["lng1"].round(4)
+        seg["b_lat"] = seg["lat2"].round(4); seg["b_lng"] = seg["lng2"].round(4)
+
+        agg = (
+            seg.groupby(["a_lat","a_lng","b_lat","b_lng"], as_index=False)["dist_km"]
+            .sum()
+            .rename(columns={"dist_km":"km"})
+            .sort_values("km", ascending=False)
+        )
+
+        if agg.empty:
+            return
+
+        agg = agg.head(min(top_k, len(agg)))
+
+        # thickness & opacity by rank
+        km_vals = agg["km"].to_numpy()
+        kmin, kmax = float(km_vals.min()), float(km_vals.max())
+        scale = (km_vals - kmin) / max(kmax - kmin, 1e-9)  # 0..1
+
+        for (_, row), s in zip(agg.iterrows(), scale):
+            latlngs = [(float(row["a_lat"]), float(row["a_lng"])),
+                    (float(row["b_lat"]), float(row["b_lng"]))]
+            weight = 2 + 6 * float(s)            # 2..8 px
+            opacity = 0.4 + 0.45 * float(s)      # 0.4..0.85
+            plugins.AntPath(
+                locations=latlngs,
+                dash_array=[10, 20],
+                delay=1000,                      # wave speed
+                weight=weight,
+                opacity=opacity,
+                color="#1976d2",
+                pulseColor="#FF6A00"
+            ).add_to(m)
+
     # ---------- Maps ----------
     def generate_route_density_map(self, df: pd.DataFrame, segments: pd.DataFrame, title: str, legend: LegendSpec) -> str:
         """
         Aggregates segment length per cell (km per cell) to reveal corridors.
+        Uses a single global meter frame and a numeric legend showing km per cell.
         """
+        # Fallback to presence density if segments are missing
         if segments is None or len(segments) == 0:
-            # fallback to presence density
             tmp = df.copy()
-            tmp["lat_round"] = tmp["lat"].round(4); tmp["lng_round"] = tmp["lng"].round(4)
-            counts = tmp.groupby(["lat_round","lng_round"]).size().reset_index(name="w")
-            counts.rename(columns={"lat_round":"lat","lng_round":"lng"}, inplace=True)
-            heat = counts[["lat","lng","w"]].values.tolist()
+            tmp["lat_round"] = tmp["lat"].round(4)
+            tmp["lng_round"] = tmp["lng"].round(4)
+            counts = tmp.groupby(["lat_round", "lng_round"]).size().reset_index(name="w")
+            counts.rename(columns={"lat_round": "lat", "lng_round": "lng"}, inplace=True)
+            heat = counts[["lat", "lng", "w"]].values.tolist()
+
             m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
             plugins.HeatMap(heat, name="Presence", radius=24, blur=18, min_opacity=0.35).add_to(m)
-            self._title(m, title); self._legend(m, legend, [("#00f",0.0),("#0ff",0.5),("#ff0",0.8),("#f00",1.0)]); self._add_layerctl(m)
+            self._title(m, title)
+            self._legend(
+                m,
+                LegendSpec(
+                    title=legend.title,
+                    unit=legend.unit,
+                    notes=(legend.notes + " Presence fallback (count per ~11 m bin).").strip()
+                ),
+                [("#2b83ba", 0.0), ("#abdda4", 0.25), ("#ffffbf", 0.5), ("#fdae61", 0.75), ("#d7191c", 1.0)]
+            )
+            self._add_layerctl(m)
             return m.get_root().render()
 
-        # Use segment midpoints to deposit length
         seg = segments.copy()
-        seg["mx"] = 0.5*(seg["x1"] + seg["x2"])
-        seg["my"] = 0.5*(seg["y1"] + seg["y2"])
-        seg["lat"] = 0.5*(seg["lat1"] + seg["lat2"])  # midpoint lat
-        seg["lng"] = 0.5*(seg["lng1"] + seg["lng2"])  # midpoint lng
+        seg["lat"] = 0.5 * (seg["lat1"] + seg["lat2"])
+        seg["lng"] = 0.5 * (seg["lng1"] + seg["lng2"])
+        lat0 = float(seg["lat"].mean()); lng0 = float(seg["lng"].mean())
+        mx, my = self._meters_per_degree(lat0)
+        seg["x_m"] = (seg["lng"] - lng0) * mx
+        seg["y_m"] = (seg["lat"] - lat0) * my
         seg["w_km"] = seg["dist_km"].astype(float)
-        grid = self._grid_accumulate(seg.rename(columns={"mx":"x_m","my":"y_m"}), "x_m", "y_m", "w_km", cell_m=80.0)
 
-        # Normalize with percentile clipping
+        grid = self._grid_accumulate(seg, "x_m", "y_m", "w_km", cell_m=80.0)
+
         w = grid["w"].values
-        vmax = np.percentile(w, 98) if len(w) else 1.0
-        norm_w = np.clip(w / max(vmax, 1e-9), 0, 1)
+        vmin = float(np.percentile(w, 2)) if len(w) else 0.0
+        vmax = float(np.percentile(w, 98)) if len(w) else 1.0
+        if vmax <= vmin:
+            vmin, vmax = 0.0, max(vmax, 1.0)
+        norm_w = np.clip((w - vmin) / max(vmax - vmin, 1e-9), 0, 1)
         heat = np.stack([grid["lat"].values, grid["lng"].values, norm_w], axis=1).tolist()
+
+        gradient = {0.0:'#2b83ba', 0.25:'#abdda4', 0.5:'#ffffbf', 0.75:'#fdae61', 1.0:'#d7191c'}
 
         m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
         plugins.HeatMap(heat, name="Route Density", min_opacity=0.35, max_zoom=18, radius=24, blur=18,
-                        gradient={0.0:'#2b83ba',0.25:'#abdda4',0.5:'#ffffbf',0.75:'#fdae61',1.0:'#d7191c'}).add_to(m)
+                        gradient=gradient).add_to(m)
         self._title(m, title)
-        self._legend(m, legend, [("#2b83ba",0.0),("#abdda4",0.25),("#ffffbf",0.5),("#fdae61",0.75),("#d7191c",1.0)])
+
+        # Numeric legend (km per cell) aligned to gradient stops
+        tick_vals = [vmin,
+                    vmin + 0.25 * (vmax - vmin),
+                    vmin + 0.50 * (vmax - vmin),
+                    vmin + 0.75 * (vmax - vmin),
+                    vmax]
+        swatches = [("#2b83ba", 0.0), ("#abdda4", 0.25), ("#ffffbf", 0.50), ("#fdae61", 0.75), ("#d7191c", 1.0)]
+        items_html = "".join(
+            f"<li><span style='background:{c}'></span>{val:.2f} {legend.unit}</li>"
+            for (c, _), val in zip(swatches, tick_vals)
+        )
+        html = f"""
+        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+                    background: white; padding: 10px 12px; border: 1px solid #aaa; border-radius: 10px;">
+        <div style="font-weight:600;margin-bottom:6px">{legend.title}</div>
+        <div style="font-size:12px;margin-bottom:6px">Units: {legend.unit}</div>
+        <ul style="list-style:none; padding:0; margin:0">{items_html}</ul>
+        <div style="font-size:11px;margin-top:6px; max-width:240px; color:#444">
+            {legend.notes} Color scale spans {vmin:.2f}–{vmax:.2f} {legend.unit} (2nd–98th percentile).
+        </div>
+        </div>
+        <style>
+        li {{ display:flex; align-items:center; gap:8px; font-size:12px; }}
+        li span {{ display:inline-block; width:24px; height:10px; border:1px solid #999; }}
+        </style>"""
+        m.get_root().html.add_child(folium.Element(html))
+
         self._add_layerctl(m)
         return m.get_root().render()
 
     def generate_endpoints_map(self, df: pd.DataFrame, segments: pd.DataFrame, title: str, legend: LegendSpec) -> str:
         """
         Endpoints = nodes with no predecessor (pickups) / no successor (dropoffs).
-        Derive from segments.
+        Uses per-layer grid counts (global meter frame) with robust normalization and a
+        dual-scale legend so the colors correspond to actual counts per cell.
         """
+        m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
+
         if segments is None or len(segments) == 0:
-            m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
-            self._title(m, title); self._legend(m, legend, [("#0f0",0.0),("#f00",1.0)]); self._add_layerctl(m)
+            self._title(m, title)
+            self._legend(m, legend, [("#0a9a00",0.33),("#55e655",0.66),("#d00000",1.0)])
+            self._add_layerctl(m)
             return m.get_root().render()
 
-        # Reconstruct predecessor/successor sets from segments
+        # Heads/tails
         starts = segments[["lat1","lng1"]].copy(); starts.columns = ["lat","lng"]
         ends   = segments[["lat2","lng2"]].copy(); ends.columns = ["lat","lng"]
 
-        # heads = lat1,lng1 that never appear as lat2,lng2; tails vice versa
-        starts_key = list(zip(starts["lat"].round(6), starts["lng"].round(6)))
-        ends_key = list(zip(ends["lat"].round(6), ends["lng"].round(6)))
-        head_mask = ~pd.Series(starts_key).isin(set(ends_key)).values
-        tail_mask = ~pd.Series(ends_key).isin(set(starts_key)).values
-        pickups = starts[head_mask]; dropoffs = ends[tail_mask]
+        # Global frame
+        lat0 = float(pd.concat([starts["lat"], ends["lat"]]).mean())
+        lng0 = float(pd.concat([starts["lng"], ends["lng"]]).mean())
+        mx, my = self._meters_per_degree(lat0)
 
-        m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
-        if len(pickups):
-            plugins.HeatMap(pickups[["lat","lng"]].values.tolist(), name="Pickups", radius=28, blur=24,
-                            gradient={0.0:'#b7f7b7',0.5:'#55e655',1.0:'#0a9a00'}).add_to(m)
-        if len(dropoffs):
-            plugins.HeatMap(dropoffs[["lat","lng"]].values.tolist(), name="Dropoffs", radius=28, blur=24,
-                            gradient={0.0:'#ffd0c7',0.5:'#ff866b',1.0:'#d00000'}).add_to(m)
+        for df_ep, name, colors in [
+            (starts.copy(), "Pickups", {0.0:'#b7f7b7', 0.5:'#55e655', 1.0:'#0a9a00'}),
+            (ends.copy(),   "Dropoffs", {0.0:'#ffd0c7', 0.5:'#ff866b', 1.0:'#d00000'})
+        ]:
+            df_ep["x_m"] = (df_ep["lng"] - lng0) * mx
+            df_ep["y_m"] = (df_ep["lat"] - lat0) * my
+            df_ep["w"] = 1.0  # unit weight per endpoint
+            grid = self._grid_accumulate(df_ep, "x_m", "y_m", "w", cell_m=80.0)
+            w = grid["w"].values
+            vmin = float(np.percentile(w, 2)) if len(w) else 0.0
+            vmax = float(np.percentile(w, 98)) if len(w) else 1.0
+            if vmax <= vmin: vmin, vmax = 0.0, max(vmax, 1.0)
+            norm = np.clip((w - vmin) / max(vmax - vmin, 1e-9), 0, 1)
+            heat = np.stack([grid["lat"].values, grid["lng"].values, norm], axis=1).tolist()
+            plugins.HeatMap(heat, name=name, radius=28, blur=24, gradient=colors, min_opacity=0.35).add_to(m)
+            if name == "Pickups":
+                pickups_span = (vmin, vmax)
+            else:
+                dropoffs_span = (vmin, vmax)
+
         self._title(m, title)
-        self._legend(m, legend, [("#0a9a00",0.33),("#55e655",0.66),("#d00000",1.0)])
+        html = f"""
+        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+                    background: white; padding: 10px 12px; border: 1px solid #aaa; border-radius: 10px;">
+        <div style="font-weight:600;margin-bottom:6px">{legend.title}</div>
+        <div style="font-size:12px;margin-bottom:6px">Units: counts per cell</div>
+        <div style="font-size:12px;margin-bottom:4px"><b>Pickups</b>: {pickups_span[0]:.0f}–{pickups_span[1]:.0f}</div>
+        <div style="font-size:12px;margin-bottom:6px"><b>Dropoffs</b>: {dropoffs_span[0]:.0f}–{dropoffs_span[1]:.0f}</div>
+        <div style="font-size:11px; max-width:260px; color:#444">{legend.notes}</div>
+        </div>"""
+        m.get_root().html.add_child(folium.Element(html))
         self._add_layerctl(m)
         return m.get_root().render()
 
@@ -210,98 +331,245 @@ class HeatmapGenerator:
     def generate_avg_speed_map(self, df: pd.DataFrame, title: str, legend: LegendSpec,
                            cell_m: float = 80.0, red_is_fast: bool = True) -> str:
         """
-        Average speed (km/h) per meter-grid cell with a clear legend.
-        red_is_fast=True -> highways glow red; False -> congestion red.
+        Average speed (km/h) per meter-grid cell with numeric legend.
+        Uses robust percentile clipping so colors represent comparable ranges across datasets.
         """
         if "speed_kmh" not in df or df["speed_kmh"].dropna().empty:
             m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
-            self._title(m, title); self._legend(m, legend, [("#ccc",0.0),("#333",1.0)]); self._add_layerctl(m)
+            self._title(m, title)
+            self._legend(m, legend, [("#ccc",0.0),("#333",1.0)])
+            self._add_layerctl(m)
             return m.get_root().render()
 
-        # local meters (reuse the same approximation as elsewhere)
         lat0 = float(df["lat"].mean()); lng0 = float(df["lng"].mean())
         mx, my = self._meters_per_degree(lat0)
-        x_m = (df["lng"].values - lng0) * mx
-        y_m = (df["lat"].values - lat0) * my
         tmp = df.copy()
-        tmp["x_m"] = x_m; tmp["y_m"] = y_m
+        tmp["x_m"] = (tmp["lng"] - lng0) * mx
+        tmp["y_m"] = (tmp["lat"] - lat0) * my
         tmp = tmp[pd.notna(tmp["speed_kmh"])]
 
         grid = self._grid_average(tmp, "x_m", "y_m", "speed_kmh", cell_m=cell_m)
 
-        # Robust scaling: use percentiles to keep mid-structure visible
         sp = grid["avg"].values
-        lo, hi = np.percentile(sp, 5), np.percentile(sp, 95)
-        lo = float(lo); hi = float(max(hi, lo + 1e-6))
-        norm = np.clip((sp - lo) / (hi - lo), 0, 1)
+        vmin = float(np.percentile(sp, 5))
+        vmax = float(np.percentile(sp, 95))
+        if vmax <= vmin: vmin, vmax = 0.0, max(vmax, 1.0)
+        norm = np.clip((sp - vmin) / max(vmax - vmin, 1e-9), 0, 1)
 
-        # Palette: either red=fast or red=slow
         if red_is_fast:
-            # low -> high : blue -> cyan -> yellow -> red
             gradient = {0.0:'#2b83ba', 0.3:'#abdda4', 0.6:'#ffffbf', 0.8:'#fdae61', 1.0:'#d7191c'}
-            legend_swatches = [("#2b83ba",0.0),("#abdda4",0.3),("#ffffbf",0.6),("#fdae61",0.8),("#d7191c",1.0)]
+            swatches = [("#2b83ba",0.0),("#abdda4",0.3),("#ffffbf",0.6),("#fdae61",0.8),("#d7191c",1.0)]
         else:
-            # low -> high : green -> yellow -> orange -> red (red = slow)
             gradient = {0.0:'#00ff00', 0.4:'#ffff00', 0.7:'#ff8800', 1.0:'#ff0000'}
-            legend_swatches = [("#00ff00",0.0),("#ffff00",0.4),("#ff8800",0.7),("#ff0000",1.0)]
+            swatches = [("#00ff00",0.0),("#ffff00",0.4),("#ff8800",0.7),("#ff0000",1.0)]
 
-        # Heat payload: (lat, lng, weight)
         heat = np.stack([grid["lat"].values, grid["lng"].values, norm], axis=1).tolist()
-
         m = folium.Map(location=self._center(grid), zoom_start=self.default_zoom, tiles="OpenStreetMap")
         plugins.HeatMap(heat, name="Average Speed", radius=24, blur=18, min_opacity=0.35, gradient=gradient).add_to(m)
 
-        # Legend with numeric bands
-        title_text = f"{legend.title} (clipped {lo:.0f}–{hi:.0f} km/h)"
-        self._title(m, title or "Average Speed Heat Map")
-        self._legend(m, LegendSpec(title=title_text, unit="km/h", notes=legend.notes),
-                     legend_swatches)
+        # Numeric legend ticks
+        tick_vals = [vmin,
+                    vmin + 0.30*(vmax - vmin),
+                    vmin + 0.60*(vmax - vmin),
+                    vmin + 0.80*(vmax - vmin),
+                    vmax]
+        items_html = "".join(
+            f"<li><span style='background:{c}'></span>{val:.0f} km/h</li>"
+            for (c, _), val in zip(swatches, tick_vals)
+        )
+        html = f"""
+        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+                    background: white; padding: 10px 12px; border: 1px solid #aaa; border-radius: 10px;">
+        <div style="font-weight:600;margin-bottom:6px">{title or "Average Speed"}</div>
+        <div style="font-size:12px;margin-bottom:6px">Units: km/h</div>
+        <ul style="list-style:none; padding:0; margin:0">{items_html}</ul>
+        <div style="font-size:11px;margin-top:6px; max-width:240px; color:#444">
+            Colors span {vmin:.0f}–{vmax:.0f} km/h (5th–95th percentile).
+        </div>
+        </div>
+        <style>
+        li {{ display:flex; align-items:center; gap:8px; font-size:12px; }}
+        li span {{ display:inline-block; width:24px; height:10px; border:1px solid #999; }}
+        </style>"""
+        m.get_root().html.add_child(folium.Element(html))
+
         self._add_layerctl(m)
         return m.get_root().render()
 
     def generate_trajectory_demand_map(self, df: pd.DataFrame, segments: pd.DataFrame, title: str, legend: LegendSpec) -> str:
         """
-        Demand = presence (all points, equal weight) + endpoint boosting.
+        Blended demand density:
+        - presence (points, unit weights),
+        - endpoints (heads/tails, unit weights),
+        - corridor support (segment km),
+        plus a directional flow overlay so users see the likely driving directions.
         """
         m = folium.Map(location=self._center(df), zoom_start=self.default_zoom, tiles="OpenStreetMap")
-        demand = [[r["lat"], r["lng"], 0.5] for _, r in df.iterrows()]
 
+        if df.empty:
+            self._title(m, title)
+            self._legend(m, legend, [("#2b83ba",0.0),("#abdda4",0.25),("#ffffbf",0.5),("#fdae61",0.75),("#d7191c",1.0)])
+            self._add_layerctl(m)
+            return m.get_root().render()
+
+        # Global frame
+        lat0 = float(df["lat"].mean()); lng0 = float(df["lng"].mean())
+        mx, my = self._meters_per_degree(lat0)
+
+        # Presence
+        pres = df.copy()
+        pres["x_m"] = (pres["lng"] - lng0) * mx
+        pres["y_m"] = (pres["lat"] - lat0) * my
+        pres["w"] = 1.0
+        g_pres = self._grid_accumulate(pres, "x_m", "y_m", "w", cell_m=80.0).rename(columns={"w": "pres_w"})
+        demand = g_pres[["lat","lng","pres_w"]].copy()
+
+        # Endpoints
         if segments is not None and len(segments):
-            starts = segments[["lat1","lng1"]].values.tolist()
-            ends = segments[["lat2","lng2"]].values.tolist()
-            demand += [[a, b, 1.0] for (a,b) in starts]
-            demand += [[a, b, 1.0] for (a,b) in ends]
+            starts = segments[["lat1","lng1"]].copy(); starts.columns = ["lat","lng"]
+            ends   = segments[["lat2","lng2"]].copy(); ends.columns = ["lat","lng"]
+            ep = pd.concat([starts, ends], ignore_index=True)
+            ep["x_m"] = (ep["lng"] - lng0) * mx
+            ep["y_m"] = (ep["lat"] - lat0) * my
+            ep["w"] = 1.0
+            g_ep = self._grid_accumulate(ep, "x_m", "y_m", "w", cell_m=80.0).rename(columns={"w":"ep_w"})
+            demand = demand.merge(g_ep, on=["lat","lng"], how="outer")
+        else:
+            demand["ep_w"] = 0.0
 
-        plugins.HeatMap(demand, name="Demand Density", radius=26, blur=18, min_opacity=0.35,
-                        gradient={0.0:'#2b83ba',0.25:'#abdda4',0.5:'#ffffbf',0.75:'#fdae61',1.0:'#d7191c'}).add_to(m)
+        # Corridor (km)
+        if segments is not None and len(segments):
+            seg = segments.copy()
+            seg["lat"] = 0.5 * (seg["lat1"] + seg["lat2"])
+            seg["lng"] = 0.5 * (seg["lng1"] + seg["lng2"])
+            seg["x_m"] = (seg["lng"] - lng0) * mx
+            seg["y_m"] = (seg["lat"] - lat0) * my
+            seg["w_km"] = seg["dist_km"].astype(float)
+            g_km = self._grid_accumulate(seg, "x_m", "y_m", "w_km", cell_m=80.0).rename(columns={"w":"km_w"})
+            demand = demand.merge(g_km, on=["lat","lng"], how="outer")
+        else:
+            demand["km_w"] = 0.0
+
+        # Fill NA
+        for col in ("pres_w","ep_w","km_w"):
+            demand[col] = demand.get(col, 0.0).fillna(0.0).astype(float)
+
+        # Robust normalization
+        def _norm(v):
+            if v.size == 0: return v, 0, 1
+            lo = float(np.percentile(v, 2)); hi = float(np.percentile(v, 98))
+            if hi <= lo: lo, hi = 0.0, max(hi, 1.0)
+            return np.clip((v - lo) / max(hi - lo, 1e-9), 0, 1), lo, hi
+
+        pres_n, pres_lo, pres_hi = _norm(demand["pres_w"].values)
+        ep_n,   ep_lo,   ep_hi   = _norm(demand["ep_w"].values)
+        km_n,   km_lo,   km_hi   = _norm(demand["km_w"].values)
+
+        blend = 0.6*pres_n + 0.8*ep_n + 0.6*km_n
+        if blend.max() > 0: blend = blend / blend.max()
+
+        heat = np.stack([demand["lat"].values, demand["lng"].values, blend], axis=1).tolist()
+        gradient = {0.0:'#2b83ba', 0.25:'#abdda4', 0.5:'#ffffbf', 0.75:'#fdae61', 1.0:'#d7191c'}
+        plugins.HeatMap(heat, name="Demand Density", radius=26, blur=18, min_opacity=0.35, gradient=gradient).add_to(m)
+
+        # FLOW OVERLAY: help users see directions on top of demand
+        self._add_flow_overlay(m, segments, top_k=200, min_len_km=0.05)
+
         self._title(m, title)
-        self._legend(m, legend, [("#2b83ba",0.0),("#abdda4",0.25),("#ffffbf",0.5),("#fdae61",0.75),("#d7191c",1.0)])
+        self._legend(
+            m,
+            LegendSpec(
+                title=legend.title,
+                unit="relative demand (0–1)",
+                notes=(legend.notes +
+                    f" Presence {pres_lo:.0f}–{pres_hi:.0f} pts/cell; "
+                    f"Endpoints {ep_lo:.0f}–{ep_hi:.0f} pts/cell; "
+                    f"Corridor {km_lo:.2f}–{km_hi:.2f} km/cell.")
+            ),
+            [("#2b83ba",0.0),("#abdda4",0.25),("#ffffbf",0.5),("#fdae61",0.75),("#d7191c",1.0)]
+        )
         self._add_layerctl(m)
         return m.get_root().render()
 
     def generate_ghg_map(self, segments: pd.DataFrame, title: str, legend: LegendSpec) -> str:
         """
         GHG = sum of segment_kg_co2e per meter-grid cell. Uses an acid color palette.
+        Now aggregates in a single global meter frame and provides a numeric legend with kg CO₂e per cell.
         """
         seg = segments.copy()
-        seg["mx"] = 0.5*(seg["x1"] + seg["x2"])
-        seg["my"] = 0.5*(seg["y1"] + seg["y2"])
-        seg["lat"] = 0.5*(seg["lat1"] + seg["lat2"])  # midpoint lat
-        seg["lng"] = 0.5*(seg["lng1"] + seg["lng2"])  # midpoint lng
-        grid = self._grid_accumulate(seg.rename(columns={"mx":"x_m","my":"y_m"}), "x_m", "y_m", "segment_kg_co2e", cell_m=80.0)
+        # Use geographic midpoints and project into ONE global meter frame.
+        seg["lat"] = 0.5 * (seg["lat1"] + seg["lat2"])
+        seg["lng"] = 0.5 * (seg["lng1"] + seg["lng2"])
+        lat0 = float(seg["lat"].mean())
+        lng0 = float(seg["lng"].mean())
+        mx, my = self._meters_per_degree(lat0)
+        seg["x_m"] = (seg["lng"] - lng0) * mx
+        seg["y_m"] = (seg["lat"] - lat0) * my
+        grid = self._grid_accumulate(seg, "x_m", "y_m", "segment_kg_co2e", cell_m=80.0)
 
         w = grid["w"].values
-        vmax = np.percentile(w, 98) if len(w) else 1.0
-        norm_w = np.clip(w / max(vmax, 1e-9), 0, 1)
+        vmin = float(np.percentile(w, 2)) if len(w) else 0.0
+        vmax = float(np.percentile(w, 98)) if len(w) else 1.0
+        if vmax <= vmin:  # degenerate case
+            vmin, vmax = 0.0, max(vmax, 1.0)
+        norm_w = np.clip((w - vmin) / max(vmax - vmin, 1e-9), 0, 1)
         heat = np.stack([grid["lat"].values, grid["lng"].values, norm_w], axis=1).tolist()
 
         # Acid palette: neon green → yellow → orange → hot pink
-        acid = {0.0:'#00FF9C', 0.3:'#C7FF00', 0.6:'#FFD400', 0.8:'#FF6A00', 1.0:'#FF007A'}
+        acid = {
+            0.0: '#00FF9C',
+            0.3: '#C7FF00',
+            0.6: '#FFD400',
+            0.8: '#FF6A00',
+            1.0: '#FF007A'
+        }
 
         m = folium.Map(location=self._center(grid), zoom_start=self.default_zoom, tiles="OpenStreetMap")
-        plugins.HeatMap(heat, name="GHG Emissions", min_opacity=0.35, max_zoom=18, radius=26, blur=18,
-                        gradient=acid).add_to(m)
+        plugins.HeatMap(
+            heat,
+            name="GHG Emissions",
+            min_opacity=0.35,
+            max_zoom=18,
+            radius=26,
+            blur=18,
+            gradient=acid
+        ).add_to(m)
         self._title(m, title)
-        self._legend(m, legend, [("#00FF9C",0.0),("#C7FF00",0.3),("#FFD400",0.6),("#FF6A00",0.8),("#FF007A",1.0)])
+
+        # Build a numeric legend so colors mean specific kg CO₂e per cell.
+        tick_vals = [
+            vmin,
+            vmin + 0.30 * (vmax - vmin),
+            vmin + 0.60 * (vmax - vmin),
+            vmin + 0.80 * (vmax - vmin),
+            vmax
+        ]
+        swatches = [
+            ("#00FF9C", 0.0),
+            ("#C7FF00", 0.30),
+            ("#FFD400", 0.60),
+            ("#FF6A00", 0.80),
+            ("#FF007A", 1.0),
+        ]
+        items_html = "".join(
+            f"<li><span style='background:{c}'></span>{val:.2f} {legend.unit}</li>"
+            for (c, _), val in zip(swatches, tick_vals)
+        )
+        html = f"""
+        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+                    background: white; padding: 10px 12px; border: 1px solid #aaa; border-radius: 10px;">
+        <div style="font-weight:600;margin-bottom:6px">{legend.title}</div>
+        <div style="font-size:12px;margin-bottom:6px">Units: {legend.unit}</div>
+        <ul style="list-style:none; padding:0; margin:0">{items_html}</ul>
+        <div style="font-size:11px;margin-top:6px; max-width:240px; color:#444">
+            {legend.notes} Color scale spans {vmin:.2f}–{vmax:.2f} {legend.unit} (2nd–98th percentile).
+        </div>
+        </div>
+        <style>
+        li {{ display:flex; align-items:center; gap:8px; font-size:12px; }}
+        li span {{ display:inline-block; width:24px; height:10px; border:1px solid #999; }}
+        </style>"""
+        m.get_root().html.add_child(folium.Element(html))
+
         self._add_layerctl(m)
         return m.get_root().render()
